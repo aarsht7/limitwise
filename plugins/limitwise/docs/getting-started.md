@@ -7,6 +7,10 @@ title: Getting started
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
+## Docs menu
+
+[Home](index.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
+
 ## Before you begin
 
 You need:

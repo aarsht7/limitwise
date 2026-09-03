@@ -2,6 +2,10 @@
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
+## Docs menu
+
+[Home](index.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
+
 ## Components
 
 `limitwise mcp` is a JSONL MCP server used by the planning skill. It exposes quota reads, explicit service setup, idempotent batch scheduling, and local task management. `limitwise daemon` is the long-running scheduler installed as a systemd user service or macOS LaunchAgent.

@@ -9,6 +9,10 @@ Schedule Codex work for a specific time while protecting your five-hour and week
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
+## Docs menu
+
+[Home](index.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
+
 LimitWise is designed for people who want to prepare work now and let Codex run it later. You describe the work in Plan mode, review the proposed model, effort, time, and budget, then confirm the schedule.
 
 ## What LimitWise does
