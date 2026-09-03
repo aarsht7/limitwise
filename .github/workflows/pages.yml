@@ -29,6 +29,9 @@ jobs:
           source: ./plugins/limitwise/docs
           destination: ./_site
       - uses: actions/upload-pages-artifact@v3
+        with:
+          name: github-pages
+          path: ./_site
 
   deploy:
     environment:
