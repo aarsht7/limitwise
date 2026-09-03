@@ -28,7 +28,14 @@ Linux x86-64 installs without a platform prompt. Other supported release platfor
 curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh | sh
 ```
 
-The installer checks Codex sign-in, downloads a prebuilt release, verifies its SHA-256 checksum, and installs the GitHub marketplace. It asks separately before installing the background service. Open a new Codex conversation afterward.
+The installer checks Codex sign-in, downloads a prebuilt release, verifies its SHA-256 checksum, installs the GitHub marketplace, and installs `limitwise@limitwise`. It asks separately before installing the background service. Open a new Codex conversation afterward.
+
+What this method installs:
+
+- plugin: `limitwise@limitwise`
+- marketplace source: `aarsht7/limitwise`
+- prebuilt binary in user data directory
+- optional background service (`systemd --user` on Linux, `launchctl` LaunchAgent on macOS)
 
 Technical users can install the marketplace without the helper:
 
@@ -37,7 +44,49 @@ codex plugin marketplace add aarsht7/limitwise
 codex plugin add limitwise@limitwise
 ```
 
-That direct flow does not install a prebuilt binary or background service. To build from source, install Rust 1.71 or newer and see the [getting-started guide](docs/getting-started.md).
+That direct flow does not install a prebuilt binary or background service.
+
+If you need a local machine-compatible binary, build from source with Rust 1.71+ (see [getting-started guide](docs/getting-started.md)).
+
+Quick verification after install:
+
+```sh
+codex plugin list
+codex plugin marketplace list
+```
+
+For service status:
+
+```sh
+# Linux
+systemctl --user status limitwise.service
+
+# macOS (untested, including Apple Silicon)
+launchctl print gui/$(id -u)/io.openai.limitwise
+```
+
+If service setup fails with a runtime loader error such as `GLIBC_* not found`, build and run from source instead of the prebuilt binary.
+
+## Uninstall and cleanup
+
+For complete removal, use the method-based cleanup guide in [docs/troubleshooting.md](docs/troubleshooting.md#remove-limitwise-complete-cleanup).
+
+In short, full cleanup usually includes:
+
+```sh
+codex plugin remove limitwise
+codex plugin marketplace remove limitwise
+```
+
+and, when installed via the one-line installer, running uninstall with purge:
+
+```sh
+# Linux
+${XDG_DATA_HOME:-$HOME/.local/share}/limitwise/bin/limitwise uninstall --purge
+
+# macOS (untested, including Apple Silicon)
+"$HOME/Library/Application Support/LimitWise/bin/limitwise" uninstall --purge
+```
 
 ## Use LimitWise
 

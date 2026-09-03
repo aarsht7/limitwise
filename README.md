@@ -10,7 +10,14 @@ LimitWise schedules Codex work while respecting rolling five-hour and weekly usa
 curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh | sh
 ```
 
-The installer verifies the release checksum, installs the plugin, then asks separately before installing the background service. Open a new Codex conversation when it finishes.
+The installer verifies the release checksum, installs the marketplace and plugin, then asks separately before installing the background service. Open a new Codex conversation when it finishes.
+
+After install, quick checks:
+
+```sh
+codex plugin list
+codex plugin marketplace list
+```
 
 Technical users can install the GitHub marketplace directly:
 
@@ -20,5 +27,7 @@ codex plugin add limitwise@limitwise
 ```
 
 Direct marketplace installation does not install a prebuilt binary or background service. Use the installer above for the complete setup.
+
+For complete uninstall and cleanup instructions by install method (installer, marketplace-only, source build, emergency manual cleanup), see [plugins/limitwise/docs/troubleshooting.md](plugins/limitwise/docs/troubleshooting.md#remove-limitwise-complete-cleanup).
 
 Plugin source and documentation live in [`plugins/limitwise`](plugins/limitwise/README.md).

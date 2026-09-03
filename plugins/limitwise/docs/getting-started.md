@@ -15,7 +15,31 @@ You need:
 - Linux x86-64 (tested), or Linux/macOS on another architecture (untested);
 - `curl` and `tar`.
 
-## Install LimitWise
+Optional but useful during setup:
+
+- `systemctl` on Linux if you want a background service;
+- `launchctl` on macOS if you want a background service;
+- Rust 1.71+ only if you want to build from source.
+
+Quick preflight checks:
+
+```sh
+codex login status
+command -v curl
+command -v tar
+```
+
+## Choose an install method
+
+Pick one method based on what you need.
+
+| Method | Best for | Installs binary | Installs plugin | Installs service |
+| --- | --- | --- | --- | --- |
+| `curl ... | sh` installer | Most users | Yes (prebuilt release) | Yes | Optional prompt |
+| Direct marketplace commands | Plugin-only setup | No | Yes | No |
+| Build from source | Dev/local compatibility work | Yes (locally built) | Usually yes (if you add marketplace/plugin) | Optional |
+
+### Method 1: One-line installer (recommended)
 
 Run:
 
@@ -24,6 +48,15 @@ curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh |
 ```
 
 The installer checks your Codex sign-in, detects your platform, downloads the matching GitHub Release archive, and verifies its SHA-256 checksum. Linux x86-64 proceeds automatically. Every untested platform requires confirmation.
+
+During install, you will see a prompt:
+
+```text
+Install and start the LimitWise background service? [y/N]
+```
+
+- Enter `y` to enable scheduled background execution now.
+- Enter `n` (or press Enter) to skip service setup and only install plugin + binary.
 
 It then installs the marketplace and plugin:
 
@@ -40,7 +73,18 @@ limitwise setup
 
 This creates a systemd user service on Linux or a LaunchAgent on macOS. The macOS LaunchAgent path is untested, including on Apple Silicon. Open a new Codex conversation after installation.
 
-## Build from source
+### Method 2: Direct marketplace install (no prebuilt binary)
+
+Use this if you only want the plugin registration and will handle the binary yourself:
+
+```sh
+codex plugin marketplace add aarsht7/limitwise
+codex plugin add limitwise@limitwise
+```
+
+This method does not install a prebuilt `limitwise` binary and does not set up the background service.
+
+### Method 3: Build from source
 
 Rust 1.71 or newer is required. From `plugins/limitwise`:
 
@@ -48,6 +92,33 @@ Rust 1.71 or newer is required. From `plugins/limitwise`:
 cargo build --release
 ./target/release/limitwise setup
 ```
+
+This builds a local binary using your machine toolchain, which can help when prebuilt binaries do not match your system runtime.
+
+## Verify installation
+
+Run these checks after any install method:
+
+```sh
+codex plugin list
+codex plugin marketplace list
+```
+
+For service-based scheduling:
+
+```sh
+# Linux
+systemctl --user status limitwise.service
+
+# macOS (untested, including Apple Silicon)
+launchctl print gui/$(id -u)/io.openai.limitwise
+```
+
+If service setup fails with a runtime loader error (for example a `GLIBC_* not found` message), use Method 3 (build from source), then retry `setup` using the locally built binary.
+
+## Uninstall or reset
+
+Complete cleanup depends on how you installed LimitWise. Use the method-based cleanup guide in [Troubleshooting](troubleshooting.md#remove-limitwise-complete-cleanup).
 
 ## Run a small example
 

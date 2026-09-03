@@ -93,24 +93,134 @@ You can also view the local JSON output:
 
 Runs stopped before Codex starts use zero tokens. If Codex started but did not report its final usage, LimitWise shows the token count as unavailable instead of guessing.
 
-## Remove LimitWise
+## Remove LimitWise (complete cleanup)
 
-Remove the background service but keep schedules and history:
+Use the flow that matches your install method.
+
+Before removing anything, close active Codex conversations that are currently using LimitWise.
+
+### Method A: Installed with the one-line installer (`curl ... | sh`)
+
+1. Run uninstall with purge using the installed binary.
 
 ```sh
-./scripts/launch-limitwise uninstall
+# Linux
+${XDG_DATA_HOME:-$HOME/.local/share}/limitwise/bin/limitwise uninstall --purge
+
+# macOS (untested, including Apple Silicon)
+"$HOME/Library/Application Support/LimitWise/bin/limitwise" uninstall --purge
 ```
 
-Remove the service and permanently delete all LimitWise schedules, transcripts, and history:
-
-```sh
-./scripts/launch-limitwise uninstall --purge
-```
-
-Then remove the plugin from Codex:
+2. Remove Codex plugin registration.
 
 ```sh
 codex plugin remove limitwise
 ```
 
-`--purge` cannot be undone.
+3. Remove the marketplace source installed by the installer.
+
+```sh
+codex plugin marketplace remove limitwise
+```
+
+If your marketplace entry was saved with the full source name, remove that too:
+
+```sh
+codex plugin marketplace remove aarsht7/limitwise
+```
+
+4. Optional: remove plugin cache leftovers.
+
+```sh
+rm -rf ~/.codex/plugins/cache/limitwise
+rm -rf ~/.codex/plugins/limitwise
+```
+
+### Method B: Installed only with marketplace commands
+
+If you installed with:
+
+```sh
+codex plugin marketplace add aarsht7/limitwise
+codex plugin add limitwise@limitwise
+```
+
+Then remove:
+
+```sh
+codex plugin remove limitwise
+codex plugin marketplace remove limitwise
+```
+
+No prebuilt binary cleanup is needed unless you manually installed one.
+
+If `codex plugin marketplace remove limitwise` fails, run `codex plugin marketplace list` and remove the exact entry name shown there.
+
+### Method C: Running from source checkout
+
+If you used `./scripts/launch-limitwise`, run from `plugins/limitwise`:
+
+```sh
+./scripts/launch-limitwise uninstall --purge
+codex plugin remove limitwise
+codex plugin marketplace remove limitwise
+```
+
+Optional: delete build artifacts and local repo checkout:
+
+```sh
+rm -rf target
+# Optional if you want to remove the local clone entirely:
+# rm -rf /path/to/LimitWise-codex-plugin
+```
+
+### Emergency cleanup if uninstall command cannot run
+
+Use this when the installed binary fails to start (for example `GLIBC_* not found`).
+
+```sh
+# Linux service cleanup
+systemctl --user disable --now limitwise.service 2>/dev/null || true
+rm -f ~/.config/systemd/user/limitwise.service
+systemctl --user daemon-reload 2>/dev/null || true
+
+# macOS service cleanup (untested, including Apple Silicon)
+launchctl bootout gui/$(id -u)/io.openai.limitwise 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/io.openai.limitwise.plist"
+
+# Data and binary cleanup
+rm -rf ~/.local/share/limitwise
+[ -n "${XDG_DATA_HOME:-}" ] && rm -rf "$XDG_DATA_HOME/limitwise"
+[ -n "${LIMITWISE_HOME:-}" ] && rm -rf "$LIMITWISE_HOME/.local/share/limitwise"
+rm -rf "$HOME/Library/Application Support/LimitWise"
+
+# Plugin and marketplace cleanup
+codex plugin remove limitwise 2>/dev/null || true
+codex plugin marketplace remove limitwise 2>/dev/null || true
+codex plugin marketplace remove aarsht7/limitwise 2>/dev/null || true
+
+# Optional cache cleanup
+rm -rf ~/.codex/plugins/cache/limitwise
+rm -rf ~/.codex/plugins/limitwise
+```
+
+### Verify cleanup
+
+```sh
+codex plugin list
+codex plugin marketplace list
+
+# Linux
+systemctl --user status limitwise.service
+
+# macOS (untested, including Apple Silicon)
+launchctl print gui/$(id -u)/io.openai.limitwise
+```
+
+Expected result:
+
+- no `limitwise@limitwise` in `codex plugin list`;
+- no LimitWise marketplace entry;
+- no active LimitWise user service.
+
+`--purge` permanently deletes schedules, transcripts, and local usage history. This action cannot be undone.
