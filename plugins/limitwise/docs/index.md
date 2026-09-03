@@ -21,6 +21,7 @@ LimitWise is designed for people who want to prepare work now and let Codex run 
 - Runs a sequence where each task starts after the previous task succeeds.
 - Supports percentage and token budgets.
 - Predicts likely and conservative usage from your local task history.
+- Uses terse replies by default while preserving exact technical values and warnings.
 - Records statuses, errors, transcripts, and token use on your computer.
 - Refuses to start when reliable quota information is unavailable.
 

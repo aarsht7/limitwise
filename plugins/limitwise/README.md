@@ -9,6 +9,7 @@ It can:
 - run a task at an exact local time;
 - run several tasks in order;
 - use either a weekly percentage budget or a token budget;
+- answer tersely by default while preserving exact technical details;
 - warn when a budget may be too small;
 - stop or skip work when quota is unavailable or nearly exhausted;
 - record task status and token usage locally.
@@ -103,6 +104,20 @@ Create this confirmed schedule.
 ```
 
 Nothing is scheduled while you are still in Plan mode.
+
+### Terse mode
+
+Terse output is built into `$schedule-codex-tasks`; there is no separate skill to install or invoke. LimitWise uses terse mode by default whenever the skill is active. Replies are shorter, but exact commands, paths, code, JSON, timestamps, task IDs, model names, effort values, error strings, quota warnings, compatibility warnings, and destructive-action confirmations stay unchanged.
+
+Use these switches in the same Codex conversation:
+
+| What you want | What to say |
+| --- | --- |
+| Default shorter replies | `terse mode` |
+| Fuller prose | `normal mode` |
+| Shortest replies | `ultra terse` |
+
+Terse mode only changes user-facing wording and scheduled-task final summaries. It does not compress your prompts, change model routing, alter quota checks, or modify scheduling behavior.
 
 ## Quick local check
 

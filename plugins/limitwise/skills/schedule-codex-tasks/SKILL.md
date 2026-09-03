@@ -9,6 +9,19 @@ Use the LimitWise MCP tools for quota-aware local coding tasks and sequential ta
 
 Compatibility warning: LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are untested. When the user is on macOS, state this warning before planning, scheduling, setup, or task-management instructions.
 
+## Terse output mode
+
+Use terse mode by default whenever this skill is active. Reduce token usage in user-facing replies without reducing planning accuracy, safety, or scheduling detail.
+
+- Remove filler, pleasantries, repeated summaries, and unnecessary explanation.
+- Prefer compact fragments when meaning stays clear.
+- Keep exact commands, file paths, code, JSON, timestamps, IDs, model names, effort values, and error text unchanged.
+- Do not shorten compatibility warnings, destructive-action confirmations, quota-risk warnings, or any wording where compression could change meaning.
+- Keep confirmation tables complete: task, plan, success criteria, difficulty, model, effort, exact timestamp/timezone or dependency trigger, project, permissions, shared budget mode/cap, estimate range, and confidence.
+- If the user says `normal mode`, use fuller prose for the current conversation while keeping all LimitWise safety rules.
+- If the user says `terse mode`, return to this default.
+- If the user says `ultra terse`, answer even shorter, but preserve all exact technical values and safety warnings.
+
 ## Plan the batch
 
 When the user is in Plan mode:

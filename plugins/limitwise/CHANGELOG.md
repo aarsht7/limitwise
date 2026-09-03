@@ -7,6 +7,7 @@
 - Add local-history p50 and p90 predictions for token and weekly-percentage usage.
 - Add cap assessments that warn when a proposed percentage or token budget looks insufficient or tight.
 - Report prediction cohorts, sample counts, confidence, and cold-start limitations without changing user caps automatically.
+- Add default terse replies for LimitWise skill usage and scheduled-task final summaries without changing scheduling or quota behavior.
 - Simplify the README and add beginner-friendly GitHub Pages documentation.
 
 ## 0.4.0 - 2026-09-03

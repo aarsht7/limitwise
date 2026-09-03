@@ -347,10 +347,7 @@ fn private_output_file(path: &Path) -> Result<File, String> {
 }
 
 fn spawn_codex(task: &Task, output: &File) -> Result<Child, String> {
-    let prompt = format!(
-        "Execute this previously confirmed one-off task.\n\nTask: {}\n\nPrompt:\n{}\n\nSuccess criteria:\n{}\n\nConstraints: work only inside the selected project; do not use network or external apps; do not perform destructive or approval-dependent actions. If any such action is required, report that the task is blocked.",
-        task.title, task.prompt, task.success_criteria
-    );
+    let prompt = codex_prompt(task);
     let stdout = output.try_clone().map_err(|e| e.to_string())?;
     let stderr = output.try_clone().map_err(|e| e.to_string())?;
     let mut command = Command::new(codex_binary());
@@ -384,6 +381,13 @@ fn spawn_codex(task: &Task, output: &File) -> Result<Child, String> {
     command
         .spawn()
         .map_err(|e| format!("cannot start Codex task: {e}"))
+}
+
+fn codex_prompt(task: &Task) -> String {
+    format!(
+        "Execute this previously confirmed one-off task.\n\nTask: {}\n\nPrompt:\n{}\n\nSuccess criteria:\n{}\n\nConstraints: work only inside the selected project; do not use network or external apps; do not perform destructive or approval-dependent actions. If any such action is required, report that the task is blocked.\n\nOutput style: keep final summaries terse. Remove filler, repeated summaries, and unnecessary explanation. Preserve exact commands, file paths, code, JSON, timestamps, IDs, model names, effort values, and error text. Do not shorten safety warnings or any wording where brevity could change meaning.",
+        task.title, task.prompt, task.success_criteria
+    )
 }
 
 fn interrupt_child(child: &mut Child) -> Result<ExitStatus, String> {
@@ -532,5 +536,40 @@ mod tests {
             find_session_id("{\"type\":\"thread.started\",\"thread_id\":\"abc\"}"),
             Some("abc".into())
         );
+    }
+
+    #[test]
+    fn codex_prompt_requests_terse_output_without_losing_constraints() {
+        let task = Task {
+            id: "task-1".into(),
+            batch_id: "batch-1".into(),
+            title: "Update status".into(),
+            prompt: "Write status.txt exactly.".into(),
+            success_criteria: "status.txt contains expected text.".into(),
+            cwd: "/tmp/project".into(),
+            run_at: 4_102_444_800,
+            run_at_iso: "2100-01-01T00:00:00+00:00".into(),
+            position: 0,
+            depends_on_task_id: None,
+            timezone: "UTC".into(),
+            difficulty: "simple".into(),
+            model: "gpt-5.6-luna".into(),
+            effort: "low".into(),
+            status: "scheduled".into(),
+            created_at: 0,
+            updated_at: 0,
+            last_error: None,
+        };
+
+        let prompt = codex_prompt(&task);
+
+        assert!(prompt.contains("Task: Update status"));
+        assert!(prompt.contains("Prompt:\nWrite status.txt exactly."));
+        assert!(prompt.contains("Success criteria:\nstatus.txt contains expected text."));
+        assert!(prompt.contains("work only inside the selected project"));
+        assert!(prompt.contains("do not use network or external apps"));
+        assert!(prompt.contains("do not perform destructive or approval-dependent actions"));
+        assert!(prompt.contains("keep final summaries terse"));
+        assert!(prompt.contains("Preserve exact commands, file paths, code, JSON, timestamps, IDs, model names, effort values, and error text"));
     }
 }

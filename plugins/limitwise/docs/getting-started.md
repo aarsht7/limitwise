@@ -176,6 +176,8 @@ Codex will show a proposal. Check the path, time, timezone, budget, model, and e
 Create this confirmed schedule.
 ```
 
+Terse output is built into `$schedule-codex-tasks`; there is no separate skill to install or invoke. LimitWise replies tersely by default when the skill is active. Say `normal mode` for fuller prose, `terse mode` to return to the default, or `ultra terse` for the shortest safe replies. Exact paths, timestamps, task IDs, commands, JSON, errors, and quota warnings are not shortened.
+
 When asked, allow LimitWise to set up its background service. Do not close or suspend the computer before the first task is due.
 
 Check progress by asking:

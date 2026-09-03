@@ -41,6 +41,26 @@ LimitWise reads current quota, inspects the project, chooses a model and reasoni
 
 Nothing is scheduled in Plan mode. After you confirm the proposal, leave Plan mode and say `Create this confirmed schedule.`
 
+## Use terse mode
+
+Terse output is built into `$schedule-codex-tasks`; there is no separate skill to install or invoke. LimitWise uses terse mode by default when the skill is active. It reduces extra prose in planning, status, and result summaries while keeping exact technical content unchanged.
+
+Preserved exactly:
+
+- commands, paths, code, and JSON;
+- timestamps, timezones, task IDs, model names, and effort values;
+- error strings, quota warnings, compatibility warnings, and destructive-action confirmations.
+
+Switch modes in the same Codex conversation:
+
+| Mode | Request |
+| --- | --- |
+| Terse default | `terse mode` |
+| Fuller prose | `normal mode` |
+| Shortest safe replies | `ultra terse` |
+
+This is output-only. It does not compress your task prompt, reduce what scheduled Codex receives, change quota enforcement, or change scheduling logic.
+
 ## Choose a budget
 
 ### Percentage budget
@@ -79,7 +99,7 @@ If one task does not complete successfully, the next task is marked `blocked` an
 
 ## Manage tasks
 
-Ask Codex in normal mode:
+Ask Codex outside Plan mode:
 
 | Action | Request |
 | --- | --- |

@@ -12,6 +12,8 @@ curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh |
 
 The installer verifies the release checksum, installs the marketplace and plugin, then asks separately before installing the background service. Open a new Codex conversation when it finishes.
 
+Terse output is built into `$schedule-codex-tasks`; there is no separate skill to install or invoke. When the LimitWise skill is active, replies are terse by default to reduce output tokens. Say `normal mode` for fuller prose, `terse mode` to return to the default, or `ultra terse` for the shortest safe replies. Exact commands, paths, timestamps, IDs, error text, and quota warnings are preserved.
+
 After install, quick checks:
 
 ```sh

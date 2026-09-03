@@ -41,6 +41,9 @@ grep -q 'gpt-5.6-luna' "$fake_args"
 grep -q 'model_reasoning_effort="medium"' "$fake_args"
 grep -q 'approval_policy="never"' "$fake_args"
 grep -q 'workspace-write' "$fake_args"
+grep -q 'keep final summaries terse' "$fake_args"
+grep -q 'do not use network or external apps' "$fake_args"
+grep -q 'fake completes after first task' "$fake_args"
 
 task_output=$(printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tasks","arguments":{}}}' \
