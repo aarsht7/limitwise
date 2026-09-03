@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+plugin_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+
+if [ -n "${LIMITWISE_BINARY:-}" ]; then
+  exec "$LIMITWISE_BINARY" "$@"
+fi
+
+if [ -x "$plugin_dir/bin/limitwise" ]; then
+  exec "$plugin_dir/bin/limitwise" "$@"
+fi
+
+case $(uname -s) in
+  Darwin)
+    installed_binary="${HOME:?HOME is required}/Library/Application Support/LimitWise/bin/limitwise"
+    ;;
+  *)
+    installed_binary="${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}/limitwise/bin/limitwise"
+    ;;
+esac
+
+if [ -x "$installed_binary" ]; then
+  exec "$installed_binary" "$@"
+fi
+
+if [ -x "$plugin_dir/target/release/limitwise" ]; then
+  exec "$plugin_dir/target/release/limitwise" "$@"
+fi
+
+exec cargo run --quiet --manifest-path "$plugin_dir/Cargo.toml" -- "$@"

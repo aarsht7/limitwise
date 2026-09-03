@@ -1,0 +1,20 @@
+{
+  "name": "limitwise",
+  "interface": {
+    "displayName": "LimitWise"
+  },
+  "plugins": [
+    {
+      "name": "limitwise",
+      "source": {
+        "source": "local",
+        "path": "./plugins/limitwise"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "limitwise",
+  "version": "0.5.0+codex.20260903105044",
+  "description": "Quota-aware Codex task scheduling. Tested only on Linux x86-64; macOS and Apple Silicon are untested.",
+  "author": {
+    "name": "LimitWise contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "scheduler",
+    "automation",
+    "usage-limits"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "LimitWise",
+    "shortDescription": "Schedule Codex tasks within usage limits.",
+    "longDescription": "Plan Codex tasks, predict likely and conservative usage from local run history, warn about tight caps, execute at exact local times or after preceding tasks under a percentage or token budget, and inspect stored token history while preserving weekly and rolling five-hour quota reserves. LimitWise has only been tested on Linux x86-64; macOS, including Apple Silicon, and other architectures are untested.",
+    "developerName": "LimitWise contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Plan and schedule these Codex tasks.",
+      "Show my scheduled LimitWise tasks.",
+      "Check my Codex usage before scheduling."
+    ],
+    "brandColor": "#2E7D6E"
+  },
+  "mcpServers": "./.mcp.json"
+}

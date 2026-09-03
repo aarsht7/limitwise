@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "limitwise": {
+      "command": "./scripts/launch-limitwise",
+      "args": ["mcp"],
+      "cwd": ".",
+      "enabled": true,
+      "default_tools_approval_mode": "prompt",
+      "tools": {
+        "usage_snapshot": { "approval_mode": "approve" },
+        "list_tasks": { "approval_mode": "approve" },
+        "get_task_status": { "approval_mode": "approve" },
+        "task_usage_stats": { "approval_mode": "approve" },
+        "estimate_batch_usage": { "approval_mode": "approve" }
+      },
+      "env_vars": ["HOME", "PATH", "XDG_DATA_HOME", "USERPROFILE", "LIMITWISE_HOME"],
+      "startup_timeout_sec": 15,
+      "tool_timeout_sec": 3600
+    }
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "LimitWise Scheduler"
+  short_description: "Schedule tasks; tested only on Linux x86-64"
+  default_prompt: "Use $schedule-codex-tasks to plan and schedule these coding tasks."
