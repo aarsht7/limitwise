@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- Accept checksum filenames with or without a leading `./`, and emit bare filenames in future release checksum manifests.
+
 ## 0.6.0 - 2026-09-23
 
 - Add optional per-batch five-hour percentage caps that renew with provider windows without weakening the global 10% reserve.

@@ -91,7 +91,17 @@ printf 'Downloading LimitWise for %s...\n' "$target"
 download "$release_base/$archive_name" "$archive"
 download "$release_base/SHA256SUMS" "$checksums"
 
-expected=$(awk -v name="$archive_name" '$2 == name || $2 == ("*" name) { print $1; exit }' "$checksums")
+expected=$(awk -v name="$archive_name" '
+  {
+    file = $2
+    sub(/^\*/, "", file)
+    sub(/^\.\//, "", file)
+    if (file == name) {
+      print $1
+      exit
+    }
+  }
+' "$checksums")
 [ -n "$expected" ] || fail "checksum entry for $archive_name is missing"
 actual=$(sha256_file "$archive")
 [ "$actual" = "$expected" ] || fail "SHA-256 checksum mismatch for $archive_name"
