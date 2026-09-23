@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-09-23
+
 - Add optional per-batch five-hour percentage caps that renew with provider windows without weakening the global 10% reserve.
 - Add explicit cross-batch continuations from `quota_interrupted` or `quota_skipped` tasks, scheduled at the recorded reset and resumed from the stored Codex session when available.
 - Add backward-compatible SQLite fields for five-hour accounting and typed task dependencies.

@@ -1,6 +1,6 @@
 {
   "name": "limitwise",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Quota-aware Codex task scheduling with terse default replies. Tested only on Linux x86-64; macOS and Apple Silicon are untested.",
   "author": {
     "name": "LimitWise contributors",
