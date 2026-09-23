@@ -17,6 +17,7 @@ You need:
 
 - Codex installed and signed in;
 - Linux x86-64 (tested), or Linux/macOS on another architecture (untested);
+- GLIBC 2.31 or newer for prebuilt Linux releases (Ubuntu 20.04 or newer);
 - `curl` and `tar`.
 
 Optional but useful during setup:

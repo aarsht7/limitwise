@@ -4,6 +4,8 @@ LimitWise is a Codex plugin that runs coding tasks later without ignoring your C
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
+Prebuilt Linux releases target GLIBC 2.31 for compatibility with Ubuntu 20.04 and newer releases.
+
 It can:
 
 - run a task at an exact local time;
@@ -21,7 +23,7 @@ LimitWise includes Linux and macOS support, but only Linux x86-64 has been teste
 ## Requirements
 
 - Codex installed and signed in
-- Linux x86-64 (tested), or Linux/macOS on another architecture (untested)
+- Ubuntu 20.04 or newer on Linux x86-64 (tested architecture), or Linux/macOS on another supported architecture (untested)
 
 ## Install from GitHub
 

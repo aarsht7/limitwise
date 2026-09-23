@@ -4,6 +4,8 @@ LimitWise schedules Codex work while respecting rolling five-hour and weekly usa
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are untested and require confirmation during installation.
 
+Prebuilt Linux releases target GLIBC 2.31 for compatibility with Ubuntu 20.04 and newer releases.
+
 ## Install
 
 ```sh
