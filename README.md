@@ -4,6 +4,8 @@ LimitWise schedules Codex work while respecting rolling five-hour and weekly usa
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are untested and require confirmation during installation.
 
+Prebuilt Linux releases target GLIBC 2.31 for compatibility with Ubuntu 20.04 and newer releases.
+
 ## Install
 
 ```sh
@@ -29,6 +31,23 @@ codex plugin add limitwise@limitwise
 ```
 
 Direct marketplace installation does not install a prebuilt binary or background service. Use the installer above for the complete setup.
+
+## Update
+
+If you installed LimitWise with the one-line installer, rerun it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh | sh
+```
+
+This downloads the latest verified release, replaces the binary, and refreshes the plugin marketplace. Choose `y` when prompted about the background service to restart it with the new binary. Existing schedules and local data are preserved. Open a new Codex conversation afterward.
+
+If you installed only the marketplace plugin, run:
+
+```sh
+codex plugin marketplace upgrade limitwise
+codex plugin add limitwise@limitwise
+```
 
 For complete uninstall and cleanup instructions by install method (installer, marketplace-only, source build, emergency manual cleanup), see [plugins/limitwise/docs/troubleshooting.md](plugins/limitwise/docs/troubleshooting.md#remove-limitwise-complete-cleanup).
 

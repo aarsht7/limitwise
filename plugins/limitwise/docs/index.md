@@ -27,7 +27,7 @@ LimitWise is designed for people who want to prepare work now and let Codex run 
 
 ## Start here
 
-1. [Install LimitWise](getting-started.md#install-limitwise).
+1. [Install LimitWise](getting-started.md#install-limitwise), or [update an existing installation](getting-started.md#update-limitwise).
 2. [Run the small file example](getting-started.md#run-a-small-example).
 3. [Learn how to schedule and manage tasks](using-limitwise.md).
 4. Open [troubleshooting](troubleshooting.md) if a task does not run.
@@ -38,7 +38,7 @@ LimitWise includes Linux and macOS code for x86-64 and ARM64, including Apple Si
 
 ## Safe defaults
 
-LimitWise keeps 10% of the rolling five-hour quota in reserve. It never silently changes the confirmed model, lowers the reasoning effort, or postpones a task because quota is low. The task is skipped or interrupted and the reason is recorded.
+LimitWise keeps 10% of the rolling five-hour quota in reserve. It never silently changes the confirmed model or lowers reasoning effort. Ordinary work is skipped or interrupted when quota is low. An explicitly confirmed `continue_from_task_id` task may be deferred to the next provider reset while the global reserve remains exhausted.
 
 Scheduled Codex runs use write access only inside the project you selected. Interactive approvals, external apps, web search, and network access are disabled.
 

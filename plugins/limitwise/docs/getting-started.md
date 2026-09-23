@@ -17,6 +17,7 @@ You need:
 
 - Codex installed and signed in;
 - Linux x86-64 (tested), or Linux/macOS on another architecture (untested);
+- GLIBC 2.31 or newer for prebuilt Linux releases (Ubuntu 20.04 or newer);
 - `curl` and `tar`.
 
 Optional but useful during setup:
@@ -98,6 +99,25 @@ cargo build --release
 ```
 
 This builds a local binary using your machine toolchain, which can help when prebuilt binaries do not match your system runtime.
+
+## Update LimitWise
+
+If you used the recommended one-line installer, rerun it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh | sh
+```
+
+The installer downloads and verifies the latest release, replaces the installed binary, and refreshes the plugin marketplace. If you use background scheduling, enter `y` at the service prompt so the service restarts with the new binary. This does not delete existing schedules, transcripts, or local usage data.
+
+If you installed only the marketplace plugin, refresh it with:
+
+```sh
+codex plugin marketplace upgrade limitwise
+codex plugin add limitwise@limitwise
+```
+
+Open a new Codex conversation after either update method. Existing conversations may retain the older plugin definition.
 
 ## Verify installation
 
@@ -198,5 +218,7 @@ Modified by LimitWise
 
 - [Schedule real work](using-limitwise.md#schedule-a-task)
 - [Use a token budget](using-limitwise.md#choose-a-budget)
+- [Add a five-hour batch cap](using-limitwise.md#optional-five-hour-budget)
+- [Continue quota-limited work](using-limitwise.md#continue-quota-limited-work)
 - [Change or cancel a task](using-limitwise.md#manage-tasks)
 - [Fix a task that did not run](troubleshooting.md)

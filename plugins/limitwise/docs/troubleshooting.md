@@ -28,6 +28,25 @@ codex plugin add limitwise@limitwise
 
 Open a new Codex conversation after installing or updating the plugin. Existing conversations may still use the older plugin definition.
 
+## LimitWise is outdated
+
+For a complete installation, rerun the installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh | sh
+```
+
+Choose `y` at the background-service prompt if you use scheduled execution. The installer replaces the binary, refreshes the marketplace, and restarts the service without deleting existing schedules or local data.
+
+For a marketplace-only installation, run:
+
+```sh
+codex plugin marketplace upgrade limitwise
+codex plugin add limitwise@limitwise
+```
+
+Then open a new Codex conversation.
+
 ## The background service is not running
 
 Install or restart it from the plugin directory:
@@ -64,11 +83,15 @@ The task did not start because the five-hour reserve, weekly quota, or selected 
 Use $schedule-codex-tasks. Show my current quota and the full status of task TASK_ID.
 ```
 
-LimitWise does not silently downgrade or postpone quota-short work. Schedule a new task after quota resets or choose a different confirmed budget.
+LimitWise does not silently downgrade ordinary quota-short work. You may explicitly plan and confirm a new batch using `continue_from_task_id: TASK_ID`. Only `quota_skipped` and `quota_interrupted` tasks with a recorded five-hour reset can be continued.
 
 ## A task says `quota_interrupted`
 
-Codex started, but a quota threshold was reached while it was running. Check the task transcript and repository state before scheduling the remaining work again.
+Codex started, but a quota threshold was reached while it was running. Check the task transcript and repository state, then explicitly plan and confirm a new batch using `continue_from_task_id: TASK_ID`. LimitWise never creates the follow-up automatically.
+
+## A continuation remains `scheduled`
+
+The provider five-hour window reset, but global usage was still at or above the 90% threshold. LimitWise moved the same continuation to the next reported reset rather than failing it. Inspect current quota and task status before changing it.
 
 ## Quota is unavailable
 

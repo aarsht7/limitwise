@@ -29,10 +29,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'macOS'
         with:
           targets: ${{ matrix.target }}
-      - run: cargo test --locked --all
-      - run: cargo build --locked --release --target "${{ matrix.target }}"
+      - name: Test and build Linux against GLIBC 2.31
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -e TARGET="${{ matrix.target }}" \
+            -v "$PWD:/work" \
+            -w /work \
+            rust:1.71-bullseye \
+            sh -c 'rustup target add "$TARGET" && cargo test --locked --all --target "$TARGET" && cargo build --locked --release --target "$TARGET"'
+      - name: Verify Linux GLIBC baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/limitwise"
+          required_glibc="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' | sort -Vu | tail -n 1)"
+          baseline_glibc="GLIBC_2.31"
+          test -n "$required_glibc"
+          if [ "$(printf '%s\n%s\n' "$required_glibc" "$baseline_glibc" | sort -V | tail -n 1)" != "$baseline_glibc" ]; then
+            echo "Linux release requires $required_glibc; maximum supported baseline is $baseline_glibc" >&2
+            exit 1
+          fi
+          echo "Linux release GLIBC requirement: $required_glibc"
+      - name: Test macOS
+        if: runner.os == 'macOS'
+        run: cargo test --locked --all
+      - name: Build macOS
+        if: runner.os == 'macOS'
+        run: cargo build --locked --release --target "${{ matrix.target }}"
       - run: ./scripts/package-release.sh "${{ matrix.target }}" dist
       - uses: actions/upload-artifact@v4
         with:
@@ -53,7 +81,7 @@ jobs:
           merge-multiple: true
       - name: Create checksums
         working-directory: dist
-        run: sha256sum *.tar.gz > SHA256SUMS
+        run: sha256sum ./*.tar.gz > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |

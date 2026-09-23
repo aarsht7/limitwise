@@ -2,6 +2,16 @@
 
 > Compatibility: LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are untested.
 
+## Unreleased
+
+## 0.6.0 - 2026-09-23
+
+- Add optional per-batch five-hour percentage caps that renew with provider windows without weakening the global 10% reserve.
+- Add explicit cross-batch continuations from `quota_interrupted` or `quota_skipped` tasks, scheduled at the recorded reset and resumed from the stored Codex session when available.
+- Add backward-compatible SQLite fields for five-hour accounting and typed task dependencies.
+- Document how existing users update complete and marketplace-only installations without deleting local state.
+- Build Linux release artifacts against GLIBC 2.31 and reject newer symbol requirements so the one-line installer supports Ubuntu 20.04 and newer.
+
 ## 0.5.0 - 2026-09-03
 
 - Add local-history p50 and p90 predictions for token and weekly-percentage usage.

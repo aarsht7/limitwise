@@ -21,6 +21,7 @@ Always prepare schedules in Plan mode. Give Codex:
 - the work to perform;
 - a clear success condition;
 - a percentage or token budget.
+- optionally, a five-hour batch cap.
 
 Example:
 
@@ -80,6 +81,10 @@ Batch token cap: 150000 total input-plus-output tokens.
 
 Use this when you want a concrete token ceiling. Token totals become available when Codex finishes a turn, so the active task can exceed the cap before LimitWise can stop later work.
 
+### Optional five-hour budget
+
+`five_hour_cap_percent` limits one batch's consumption in each provider five-hour window. For example, `5` allows at most five percentage points in that window, still bounded by the global 10% reserve. The allowance resets when the provider window resets. Omit this field when only the global reserve should apply.
+
 ## Chain tasks
 
 The first task needs an exact time. Later tasks can start immediately after the previous task succeeds:
@@ -97,6 +102,14 @@ Update the documentation.
 
 If one task does not complete successfully, the next task is marked `blocked` and does not run.
 
+## Continue quota-limited work
+
+Only a task in `quota_interrupted` or `quota_skipped` state can be continued. Plan and confirm a new batch whose first task uses `continue_from_task_id: TASK_ID` instead of `run_at` or `after_previous`.
+
+LimitWise uses the predecessor's recorded five-hour reset time. A past reset makes the task immediately eligible. The new batch gets its own weekly or token budget and optional five-hour cap. LimitWise resumes the predecessor's Codex session when supported and available; otherwise, it starts fresh with the predecessor ID, prompt, transcript path, bounded transcript excerpt, and existing worktree context.
+
+No successor is created automatically. Ordinary failure, cancellation, blocking, missing quota snapshots, a different worktree, and invalid dependency chains are rejected. If the global reserve remains exhausted at reset, the existing continuation is deferred to the next provider reset.
+
 ## Manage tasks
 
 Ask Codex outside Plan mode:
@@ -113,7 +126,7 @@ Ask Codex outside Plan mode:
 | Check token history | `Show LimitWise token stats for the last year, month, week, each of the last seven days, and each recent run.` |
 | Estimate work | `Estimate usage for these tasks and warn me if this cap looks too low: ...` |
 
-Only a task still marked `scheduled` can be changed or cancelled. A chained task has no clock time to change, but its prompt, success condition, project, model, and effort can be changed before it starts.
+Only a task still marked `scheduled` can be changed or cancelled. A success-chained task has no clock time to change, but its prompt, success condition, project, model, and effort can be changed before it starts. A quota-reset continuation must remain in its predecessor worktree.
 
 ## Understand statuses
 

@@ -10,7 +10,9 @@
 
 `limitwise mcp` is a JSONL MCP server used by the planning skill. It exposes quota reads, explicit service setup, idempotent batch scheduling, and local task management. `limitwise daemon` is the long-running scheduler installed as a systemd user service or macOS LaunchAgent.
 
-SQLite is the durable boundary. `batches` stores the selected budget mode, percentage or token cap, token consumption, compatibility basis, and active weekly-window accounting. `tasks` stores the confirmed prompt, success criteria, project, UTC instant, IANA timezone, optional prerequisite, batch position, difficulty, model, effort, and state. `runs` stores before/after quota snapshots, token usage, timing, Codex session id, transcript path, outcome, and failure reason.
+SQLite is the durable boundary. `batches` stores the selected budget mode, percentage or token cap, token consumption, compatibility basis, active weekly-window accounting, and optional five-hour-window accounting. `tasks` stores the confirmed prompt, success criteria, project, UTC instant, IANA timezone, optional prerequisite and its `success` or `quota_reset` type, batch position, difficulty, model, effort, and state. `runs` stores before/after quota snapshots, token usage, timing, Codex session id, transcript path, outcome, and failure reason.
+
+Migration only adds nullable or defaulted columns, so existing rows and schedules retain old semantics. Rolling back the binary leaves those columns intact. Before rollback, cancel any scheduled task using a five-hour cap or `quota_reset`; older binaries do not understand those enforcement rules.
 
 Token recording is independent of budget enforcement. Percentage-mode and token-mode Codex runs both persist reported input-plus-output usage. Scheduler decisions made before launch persist zero; launched runs without a final usage event remain explicitly unavailable. An additive `token_usage_state` migration backfills retained transcripts idempotently while preserving unknown values. `task_usage_stats` derives rolling 365-day, 30-day, and seven-day summaries, local daily buckets, and recent per-run details from this single run history without duplicating aggregates.
 
@@ -36,6 +38,8 @@ Token-mode batches use one non-resetting `token_cap` shared by every task. The d
 
 The adapter accepts only one 300-minute window and one unique longest window above it. Missing, malformed, or ambiguous data is an error. No Codex task starts at 90% or more five-hour usage, at exhausted weekly usage, when its selected batch budget is exhausted, or when telemetry is unavailable. Observable threshold crossings interrupt a running task.
 
+When `five_hour_cap_percent` is present, each batch separately records the provider five-hour reset identity, baseline, allowance, and consumption. The allowance is clamped to capacity below the global 90% threshold. A new provider reset creates a fresh allowance. Omission leaves only the global reserve. Provider deltas can include concurrent interactive use, so enforcement remains conservative.
+
 ## Task lifecycle
 
 ```text
@@ -52,6 +56,8 @@ Claiming is an atomic SQLite state transition, so duplicate daemon delivery cann
 
 A task with `after_previous` stores the preceding task id as its prerequisite and becomes eligible only after that task reaches `completed`. Its five-minute grace begins at prerequisite completion. Any other terminal prerequisite state records the dependent task as `blocked`; the rule propagates through a chain.
 
+A task with `continue_from_task_id` stores a `quota_reset` prerequisite. Creation requires an existing `quota_interrupted` or `quota_skipped` predecessor in the same worktree with a valid quota snapshot. Its due time is the predecessor's recorded five-hour reset, or immediately when that reset has passed. The new batch owns fresh weekly/token and optional five-hour budgets. No task is created automatically. If the global reserve still blocks launch, the claimed continuation returns to `scheduled` at the next reset instead of becoming terminal.
+
 ## Execution boundary
 
-The daemon launches the confirmed Codex model and effort with `workspace-write`, `approval_policy="never"`, user configuration ignored, no web/network/apps, and no dangerous bypass. A process group receives `SIGINT` first on quota interruption, followed by `SIGTERM` after a grace period. JSONL output is kept as the transcript and scanned for the persistent session id.
+The daemon launches the confirmed Codex model and effort with `workspace-write`, interactive approvals disabled, user configuration ignored, no web/network/apps, and no dangerous bypass. A process group receives `SIGINT` first on quota interruption, followed by `SIGTERM` after a grace period. JSONL output is kept as the transcript and scanned for the persistent session id. A continuation resumes that session when supported and present; otherwise, its fresh prompt includes predecessor ID, prompt, success criteria, transcript path, a bounded transcript excerpt, and worktree context.

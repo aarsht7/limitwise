@@ -4,11 +4,15 @@ LimitWise is a Codex plugin that runs coding tasks later without ignoring your C
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
+Prebuilt Linux releases target GLIBC 2.31 for compatibility with Ubuntu 20.04 and newer releases.
+
 It can:
 
 - run a task at an exact local time;
 - run several tasks in order;
 - use either a weekly percentage budget or a token budget;
+- optionally limit each batch inside every rolling five-hour window;
+- continue manually-created follow-up work after a quota reset;
 - answer tersely by default while preserving exact technical details;
 - warn when a budget may be too small;
 - stop or skip work when quota is unavailable or nearly exhausted;
@@ -19,7 +23,7 @@ LimitWise includes Linux and macOS support, but only Linux x86-64 has been teste
 ## Requirements
 
 - Codex installed and signed in
-- Linux x86-64 (tested), or Linux/macOS on another architecture (untested)
+- Ubuntu 20.04 or newer on Linux x86-64 (tested architecture), or Linux/macOS on another supported architecture (untested)
 
 ## Install from GitHub
 
@@ -67,6 +71,23 @@ launchctl print gui/$(id -u)/io.openai.limitwise
 ```
 
 If service setup fails with a runtime loader error such as `GLIBC_* not found`, build and run from source instead of the prebuilt binary.
+
+## Update LimitWise
+
+If you installed LimitWise with the one-line installer, rerun it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh | sh
+```
+
+The installer downloads the latest verified release, replaces the binary, and refreshes the plugin marketplace. Choose `y` when prompted about the background service to restart it with the new binary. Existing schedules and local data are preserved. Open a new Codex conversation afterward.
+
+For a marketplace-only installation, run:
+
+```sh
+codex plugin marketplace upgrade limitwise
+codex plugin add limitwise@limitwise
+```
 
 ## Uninstall and cleanup
 
@@ -197,8 +218,15 @@ Only tasks that have not started can be changed or cancelled.
 
 - **Percentage:** `1` means one percentage point of the full weekly limit. The allowance renews when the weekly window resets.
 - **Tokens:** one token cap is shared by the whole batch. A running task can slightly exceed it because Codex reports usage at turn boundaries.
+- **Optional five-hour cap:** limits one batch to the selected percentage points in each provider five-hour window. It resets with that window. Omitting it adds no batch-specific five-hour cap.
 
 Both modes keep a 10% reserve in the rolling five-hour window. If quota data is missing, LimitWise does not start Codex.
+
+## Continue after quota reset
+
+If a task ends as `quota_interrupted` or `quota_skipped`, create a new confirmed batch with `continue_from_task_id` set to that task ID. LimitWise schedules it for the predecessor's five-hour reset, gives it a fresh weekly or token budget, and resumes the stored Codex session when supported and available. Otherwise, it starts a fresh session with predecessor, transcript excerpt, and worktree context.
+
+Continuations are never created automatically. Failed, cancelled, blocked, missed, running, completed, and scheduled tasks cannot be continuation sources. If the global 10% reserve still blocks a continuation at reset, LimitWise defers that same scheduled task to the next reset.
 
 ## More help
 
