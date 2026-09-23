@@ -1,12 +1,14 @@
 use crate::config::{set_private_file, Paths};
 use crate::model::{route, validate_route, Difficulty};
 use crate::transcript::token_usage;
+use crate::usage::UsageSnapshot;
 use chrono::{DateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +39,8 @@ pub struct TaskDraft {
     #[serde(default)]
     pub after_previous: bool,
     #[serde(default)]
+    pub continue_from_task_id: Option<String>,
+    #[serde(default)]
     pub timezone: Option<String>,
     pub difficulty: Difficulty,
     #[serde(default)]
@@ -56,6 +60,8 @@ pub struct ScheduleBatchInput {
     pub token_cap: Option<i64>,
     #[serde(default)]
     pub cap_percent: Option<f64>,
+    #[serde(default)]
+    pub five_hour_cap_percent: Option<f64>,
     pub tasks: Vec<TaskDraft>,
 }
 
@@ -103,6 +109,11 @@ pub struct Batch {
     pub baseline_weekly_used_percent: Option<f64>,
     pub allowance_points: f64,
     pub consumed_points: f64,
+    pub five_hour_cap_percent: Option<f64>,
+    pub five_hour_window_reset_at: Option<i64>,
+    pub baseline_five_hour_used_percent: Option<f64>,
+    pub five_hour_allowance_points: f64,
+    pub five_hour_consumed_points: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -117,6 +128,7 @@ pub struct Task {
     pub run_at_iso: String,
     pub position: i64,
     pub depends_on_task_id: Option<String>,
+    pub dependency_type: String,
     pub timezone: String,
     pub difficulty: String,
     pub model: String,
@@ -157,6 +169,18 @@ pub struct RunFinish<'a> {
     pub transcript: Option<&'a str>,
     pub tokens_used: Option<i64>,
     pub error: Option<&'a str>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContinuationContext {
+    pub predecessor_task_id: String,
+    pub predecessor_title: String,
+    pub predecessor_prompt: String,
+    pub predecessor_success_criteria: String,
+    pub cwd: String,
+    pub session_id: Option<String>,
+    pub transcript_path: Option<String>,
+    pub transcript_excerpt: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -268,7 +292,12 @@ impl Store {
                    window_reset_at INTEGER,
                    baseline_weekly_used_percent REAL,
                    allowance_points REAL NOT NULL DEFAULT 0,
-                   consumed_points REAL NOT NULL DEFAULT 0
+                   consumed_points REAL NOT NULL DEFAULT 0,
+                   five_hour_cap_percent REAL,
+                   five_hour_window_reset_at INTEGER,
+                   baseline_five_hour_used_percent REAL,
+                   five_hour_allowance_points REAL NOT NULL DEFAULT 0,
+                   five_hour_consumed_points REAL NOT NULL DEFAULT 0
                  );
                  CREATE TABLE IF NOT EXISTS tasks (
                    id TEXT PRIMARY KEY,
@@ -287,7 +316,8 @@ impl Store {
                    updated_at INTEGER NOT NULL,
                    last_error TEXT,
                    position INTEGER NOT NULL DEFAULT 0,
-                   depends_on_task_id TEXT REFERENCES tasks(id)
+                   depends_on_task_id TEXT REFERENCES tasks(id),
+                   dependency_type TEXT NOT NULL DEFAULT 'success'
                  );
                  CREATE TABLE IF NOT EXISTS runs (
                    id TEXT PRIMARY KEY,
@@ -324,6 +354,31 @@ impl Store {
             "consumed_tokens",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        add_column_if_missing(&connection, "batches", "five_hour_cap_percent", "REAL")?;
+        add_column_if_missing(
+            &connection,
+            "batches",
+            "five_hour_window_reset_at",
+            "INTEGER",
+        )?;
+        add_column_if_missing(
+            &connection,
+            "batches",
+            "baseline_five_hour_used_percent",
+            "REAL",
+        )?;
+        add_column_if_missing(
+            &connection,
+            "batches",
+            "five_hour_allowance_points",
+            "REAL NOT NULL DEFAULT 0",
+        )?;
+        add_column_if_missing(
+            &connection,
+            "batches",
+            "five_hour_consumed_points",
+            "REAL NOT NULL DEFAULT 0",
+        )?;
         add_column_if_missing(
             &connection,
             "tasks",
@@ -335,6 +390,12 @@ impl Store {
             "tasks",
             "depends_on_task_id",
             "TEXT REFERENCES tasks(id)",
+        )?;
+        add_column_if_missing(
+            &connection,
+            "tasks",
+            "dependency_type",
+            "TEXT NOT NULL DEFAULT 'success'",
         )?;
         add_column_if_missing(&connection, "runs", "tokens_used", "INTEGER")?;
         add_column_if_missing(
@@ -373,7 +434,9 @@ impl Store {
             });
         }
         let budget = requested_budget(&input)?;
-        let normalized = normalize_drafts(&input.tasks)?;
+        let normalized = normalize_drafts(&input.tasks, |predecessor_id, cwd| {
+            self.continuation_reset_at(predecessor_id, cwd)
+        })?;
         let task_ids: Vec<String> = input.tasks.iter().map(|_| new_id("task")).collect();
         let now = now_epoch();
         let batch_id = new_id("batch");
@@ -381,8 +444,8 @@ impl Store {
         transaction
             .execute(
                 "INSERT INTO batches
-                 (id,idempotency_key,cap_percent,cap_basis,budget_mode,token_cap,created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                 (id,idempotency_key,cap_percent,cap_basis,budget_mode,token_cap,created_at,five_hour_cap_percent)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     batch_id,
                     input.idempotency_key,
@@ -390,31 +453,29 @@ impl Store {
                     budget.cap_basis,
                     budget.mode.to_string(),
                     budget.token_cap,
-                    now
+                    now,
+                    input.five_hour_cap_percent,
                 ],
             )
             .map_err(|e| e.to_string())?;
-        for (position, (draft, normalized)) in input
-            .tasks
-            .into_iter()
-            .zip(normalized.into_iter())
-            .enumerate()
-        {
-            let dependency = if normalized.depends_on_previous {
-                Some(task_ids[position - 1].as_str())
+        for (position, (draft, normalized)) in input.tasks.into_iter().zip(normalized).enumerate() {
+            let (dependency, dependency_type) = if draft.after_previous {
+                (Some(task_ids[position - 1].as_str()), "success")
+            } else if let Some(predecessor) = draft.continue_from_task_id.as_deref() {
+                (Some(predecessor), "quota_reset")
             } else {
-                None
+                (None, "success")
             };
             transaction
                 .execute(
                     "INSERT INTO tasks
-                     (id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,position,depends_on_task_id)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'scheduled',?12,?12,?13,?14)",
+                     (id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,position,depends_on_task_id,dependency_type)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'scheduled',?12,?12,?13,?14,?15)",
                     params![
                         task_ids[position], batch_id, draft.title.trim(), draft.prompt.trim(),
                         draft.success_criteria.trim(), draft.cwd, normalized.run_at,
                         normalized.timezone, draft.difficulty.to_string(), normalized.model,
-                        normalized.effort, now, position as i64, dependency
+                        normalized.effort, now, position as i64, dependency, dependency_type
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -432,7 +493,7 @@ impl Store {
     }
 
     pub fn list_tasks(&self, status: Option<&str>) -> Result<Vec<Task>, String> {
-        let mut sql = "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id FROM tasks".to_string();
+        let mut sql = "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type FROM tasks".to_string();
         if status.is_some() {
             sql.push_str(" WHERE status=?1");
         }
@@ -454,7 +515,7 @@ impl Store {
     pub fn task(&self, task_id: &str) -> Result<Option<Task>, String> {
         self.connection
             .query_row(
-                "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id FROM tasks WHERE id=?1",
+                "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type FROM tasks WHERE id=?1",
                 params![task_id], row_to_task,
             )
             .optional().map_err(|e| e.to_string())
@@ -634,11 +695,15 @@ impl Store {
         let mut statement = self.connection.prepare(
             "SELECT task.id,task.batch_id,task.title,task.prompt,task.success_criteria,task.cwd,
                     task.run_at,task.timezone,task.difficulty,task.model,task.effort,task.status,
-                    task.created_at,task.updated_at,task.last_error,task.position,task.depends_on_task_id
+                    task.created_at,task.updated_at,task.last_error,task.position,task.depends_on_task_id,
+                    task.dependency_type
              FROM tasks task
              LEFT JOIN tasks prerequisite ON prerequisite.id=task.depends_on_task_id
              WHERE task.status='scheduled' AND task.run_at<=?1
-               AND (task.depends_on_task_id IS NULL OR prerequisite.status='completed')
+               AND (task.depends_on_task_id IS NULL
+                    OR (task.dependency_type='success' AND prerequisite.status='completed')
+                    OR (task.dependency_type='quota_reset'
+                        AND prerequisite.status IN ('quota_interrupted','quota_skipped')))
              ORDER BY task.run_at ASC, task.position ASC",
         ).map_err(|e| e.to_string())?;
         let tasks = statement
@@ -653,10 +718,12 @@ impl Store {
         let mut statement = self.connection.prepare(
             "SELECT task.id,task.batch_id,task.title,task.prompt,task.success_criteria,task.cwd,
                     task.run_at,task.timezone,task.difficulty,task.model,task.effort,task.status,
-                    task.created_at,task.updated_at,task.last_error,task.position,task.depends_on_task_id
+                    task.created_at,task.updated_at,task.last_error,task.position,task.depends_on_task_id,
+                    task.dependency_type
              FROM tasks task
              JOIN tasks prerequisite ON prerequisite.id=task.depends_on_task_id
              WHERE task.status='scheduled'
+               AND task.dependency_type='success'
                AND prerequisite.status NOT IN ('scheduled','running','completed')
              ORDER BY task.run_at ASC, task.position ASC",
         ).map_err(|e| e.to_string())?;
@@ -672,6 +739,9 @@ impl Store {
         let Some(dependency_id) = task.depends_on_task_id.as_deref() else {
             return Ok(None);
         };
+        if task.dependency_type != "success" {
+            return Ok(None);
+        }
         self.connection
             .query_row(
                 "SELECT updated_at FROM tasks WHERE id=?1 AND status='completed'",
@@ -731,6 +801,9 @@ impl Store {
             task.run_at
         };
         let cwd = update.cwd.unwrap_or(task.cwd.clone());
+        if task.dependency_type == "quota_reset" && cwd != task.cwd {
+            return Err("a continuation task must stay in the predecessor worktree".to_string());
+        }
         validate_cwd(&cwd)?;
         self.connection.execute(
             "UPDATE tasks SET title=?2,prompt=?3,success_criteria=?4,cwd=?5,run_at=?6,timezone=?7,difficulty=?8,model=?9,effort=?10,updated_at=?11 WHERE id=?1",
@@ -769,9 +842,121 @@ impl Store {
         Ok(())
     }
 
+    pub fn defer_continuation(
+        &self,
+        task_id: &str,
+        run_at: i64,
+        reason: &str,
+    ) -> Result<(), String> {
+        if run_at <= now_epoch() {
+            return Err("next 5-hour quota reset must be in the future".to_string());
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE tasks SET status='scheduled',run_at=?2,last_error=?3,updated_at=?4
+                 WHERE id=?1 AND status='running' AND dependency_type='quota_reset'",
+                params![task_id, run_at, reason, now_epoch()],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("only a running quota-reset continuation can be deferred".to_string());
+        }
+        Ok(())
+    }
+
+    fn continuation_reset_at(&self, predecessor_id: &str, cwd: &str) -> Result<i64, String> {
+        let predecessor = self
+            .task(predecessor_id)?
+            .ok_or_else(|| format!("continuation predecessor task not found: {predecessor_id}"))?;
+        if !matches!(
+            predecessor.status.as_str(),
+            "quota_interrupted" | "quota_skipped"
+        ) {
+            return Err(format!(
+                "continuation predecessor must be quota_interrupted or quota_skipped, not {}",
+                predecessor.status
+            ));
+        }
+        if predecessor.cwd != cwd {
+            return Err("continuation task must use the predecessor worktree".to_string());
+        }
+        self.validate_existing_dependency_chain(predecessor_id)?;
+        let usage_json = self
+            .connection
+            .query_row(
+                "SELECT COALESCE(usage_after_json,usage_before_json) FROM runs
+                 WHERE task_id=?1 ORDER BY started_at DESC LIMIT 1",
+                params![predecessor_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .ok_or_else(|| "continuation predecessor has no quota snapshot".to_string())?;
+        let snapshot: UsageSnapshot = serde_json::from_str(&usage_json)
+            .map_err(|_| "continuation predecessor has no valid quota snapshot".to_string())?;
+        Ok(snapshot.five_hour.resets_at.max(now_epoch()))
+    }
+
+    fn validate_existing_dependency_chain(&self, task_id: &str) -> Result<(), String> {
+        let mut current = Some(task_id.to_string());
+        let mut seen = HashSet::new();
+        while let Some(id) = current {
+            if !seen.insert(id.clone()) {
+                return Err("continuation predecessor has an invalid dependency cycle".to_string());
+            }
+            current = self.task(&id)?.and_then(|task| task.depends_on_task_id);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn continuation_context(
+        &self,
+        task: &Task,
+    ) -> Result<Option<ContinuationContext>, String> {
+        if task.dependency_type != "quota_reset" {
+            return Ok(None);
+        }
+        let predecessor_id = task
+            .depends_on_task_id
+            .as_deref()
+            .ok_or_else(|| "quota-reset continuation has no predecessor".to_string())?;
+        let predecessor = self
+            .task(predecessor_id)?
+            .ok_or_else(|| "continuation predecessor not found".to_string())?;
+        let run = self
+            .connection
+            .query_row(
+                "SELECT session_id,transcript_path FROM runs
+                 WHERE task_id=?1 ORDER BY started_at DESC LIMIT 1",
+                params![predecessor_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let (session_id, transcript_path) = run.unwrap_or((None, None));
+        let transcript_excerpt = transcript_path.as_deref().and_then(read_transcript_excerpt);
+        Ok(Some(ContinuationContext {
+            predecessor_task_id: predecessor.id,
+            predecessor_title: predecessor.title,
+            predecessor_prompt: predecessor.prompt,
+            predecessor_success_criteria: predecessor.success_criteria,
+            cwd: predecessor.cwd,
+            session_id: session_id.filter(|value| !value.trim().is_empty()),
+            transcript_path,
+            transcript_excerpt,
+        }))
+    }
+
     pub fn batch(&self, batch_id: &str) -> Result<Option<Batch>, String> {
         self.connection.query_row(
-            "SELECT id,idempotency_key,budget_mode,token_cap,consumed_tokens,cap_percent,cap_basis,created_at,window_reset_at,baseline_weekly_used_percent,allowance_points,consumed_points FROM batches WHERE id=?1",
+            "SELECT id,idempotency_key,budget_mode,token_cap,consumed_tokens,cap_percent,cap_basis,created_at,window_reset_at,baseline_weekly_used_percent,allowance_points,consumed_points,five_hour_cap_percent,five_hour_window_reset_at,baseline_five_hour_used_percent,five_hour_allowance_points,five_hour_consumed_points FROM batches WHERE id=?1",
             params![batch_id], row_to_batch,
         ).optional().map_err(|e| e.to_string())
     }
@@ -800,6 +985,70 @@ impl Store {
                 params![batch_id, reset_at, weekly_used, allowance],
             ).map_err(|e| e.to_string())?;
         }
+        self.batch(batch_id)?
+            .ok_or_else(|| "batch not found".to_string())
+    }
+
+    pub fn ensure_five_hour_window(
+        &self,
+        batch_id: &str,
+        five_hour_used: f64,
+        reset_at: i64,
+    ) -> Result<Batch, String> {
+        let current = self
+            .batch(batch_id)?
+            .ok_or_else(|| "batch not found".to_string())?;
+        let Some(cap) = current.five_hour_cap_percent else {
+            return Ok(current);
+        };
+        if current.five_hour_window_reset_at != Some(reset_at) {
+            let available_before_reserve =
+                (100.0 - crate::config::FIVE_HOUR_RESERVE_PERCENT - five_hour_used).max(0.0);
+            let allowance = cap.min(available_before_reserve);
+            self.connection
+                .execute(
+                    "UPDATE batches
+                     SET five_hour_window_reset_at=?2,baseline_five_hour_used_percent=?3,
+                         five_hour_allowance_points=?4,five_hour_consumed_points=0
+                     WHERE id=?1",
+                    params![batch_id, reset_at, five_hour_used, allowance],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        self.batch(batch_id)?
+            .ok_or_else(|| "batch not found".to_string())
+    }
+
+    pub fn add_five_hour_consumption(&self, batch_id: &str, delta: f64) -> Result<Batch, String> {
+        self.connection
+            .execute(
+                "UPDATE batches
+                 SET five_hour_consumed_points=MIN(100.0, five_hour_consumed_points + ?2)
+                 WHERE id=?1 AND five_hour_cap_percent IS NOT NULL",
+                params![batch_id, delta.max(0.0)],
+            )
+            .map_err(|e| e.to_string())?;
+        self.batch(batch_id)?
+            .ok_or_else(|| "batch not found".to_string())
+    }
+
+    pub fn reconcile_five_hour_consumption(
+        &self,
+        batch_id: &str,
+        five_hour_used: f64,
+    ) -> Result<Batch, String> {
+        self.connection
+            .execute(
+                "UPDATE batches
+                 SET five_hour_consumed_points=MAX(
+                     five_hour_consumed_points,
+                     MAX(0, ?2 - baseline_five_hour_used_percent)
+                 )
+                 WHERE id=?1 AND five_hour_cap_percent IS NOT NULL
+                   AND baseline_five_hour_used_percent IS NOT NULL",
+                params![batch_id, five_hour_used],
+            )
+            .map_err(|e| e.to_string())?;
         self.batch(batch_id)?
             .ok_or_else(|| "batch not found".to_string())
     }
@@ -875,14 +1124,14 @@ impl Store {
 
     fn batch_by_idempotency(&self, key: &str) -> Result<Option<Batch>, String> {
         self.connection.query_row(
-            "SELECT id,idempotency_key,budget_mode,token_cap,consumed_tokens,cap_percent,cap_basis,created_at,window_reset_at,baseline_weekly_used_percent,allowance_points,consumed_points FROM batches WHERE idempotency_key=?1",
+            "SELECT id,idempotency_key,budget_mode,token_cap,consumed_tokens,cap_percent,cap_basis,created_at,window_reset_at,baseline_weekly_used_percent,allowance_points,consumed_points,five_hour_cap_percent,five_hour_window_reset_at,baseline_five_hour_used_percent,five_hour_allowance_points,five_hour_consumed_points FROM batches WHERE idempotency_key=?1",
             params![key], row_to_batch,
         ).optional().map_err(|e| e.to_string())
     }
 
     fn tasks_for_batch(&self, batch_id: &str) -> Result<Vec<Task>, String> {
         let mut statement = self.connection.prepare(
-            "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id FROM tasks WHERE batch_id=?1 ORDER BY run_at ASC, position ASC",
+            "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type FROM tasks WHERE batch_id=?1 ORDER BY run_at ASC, position ASC",
         ).map_err(|e| e.to_string())?;
         let tasks = statement
             .query_map(params![batch_id], row_to_task)
@@ -898,6 +1147,11 @@ fn validate_batch_input(input: &ScheduleBatchInput) -> Result<(), String> {
         return Err("idempotency_key is required".to_string());
     }
     requested_budget(input)?;
+    if let Some(cap) = input.five_hour_cap_percent {
+        if !cap.is_finite() || cap <= 0.0 || cap > 100.0 {
+            return Err("five_hour_cap_percent must be greater than 0 and at most 100".to_string());
+        }
+    }
     if input.tasks.is_empty() {
         return Err("at least one task is required".to_string());
     }
@@ -906,7 +1160,7 @@ fn validate_batch_input(input: &ScheduleBatchInput) -> Result<(), String> {
             return Err("every task needs a title and prompt".to_string());
         }
     }
-    normalize_drafts(&input.tasks)?;
+    validate_draft_triggers(&input.tasks)?;
     Ok(())
 }
 
@@ -988,10 +1242,41 @@ struct NormalizedDraft {
     timezone: String,
     model: String,
     effort: String,
-    depends_on_previous: bool,
 }
 
-fn normalize_drafts(drafts: &[TaskDraft]) -> Result<Vec<NormalizedDraft>, String> {
+fn validate_draft_triggers(drafts: &[TaskDraft]) -> Result<(), String> {
+    for (index, draft) in drafts.iter().enumerate() {
+        let continuation = draft
+            .continue_from_task_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        if draft.continue_from_task_id.is_some() && continuation.is_none() {
+            return Err("continue_from_task_id cannot be empty".to_string());
+        }
+        let trigger_count = usize::from(draft.run_at.is_some())
+            + usize::from(draft.after_previous)
+            + usize::from(continuation.is_some());
+        if trigger_count != 1 {
+            return Err(
+                "each task must use exactly one of run_at, after_previous, or continue_from_task_id"
+                    .to_string(),
+            );
+        }
+        if draft.after_previous && index == 0 {
+            return Err("the first task cannot use after_previous".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn normalize_drafts<F>(
+    drafts: &[TaskDraft],
+    continuation_reset_at: F,
+) -> Result<Vec<NormalizedDraft>, String>
+where
+    F: Fn(&str, &str) -> Result<i64, String>,
+{
+    validate_draft_triggers(drafts)?;
     let mut normalized: Vec<NormalizedDraft> = Vec::with_capacity(drafts.len());
     for (index, draft) in drafts.iter().enumerate() {
         validate_cwd(&draft.cwd)?;
@@ -1001,13 +1286,9 @@ fn normalize_drafts(drafts: &[TaskDraft]) -> Result<Vec<NormalizedDraft>, String
             .unwrap_or_else(crate::config::system_timezone);
         validate_timezone(&timezone)?;
         let run_at = if draft.after_previous {
-            if index == 0 {
-                return Err("the first task cannot use after_previous".to_string());
-            }
-            if draft.run_at.is_some() {
-                return Err("a task with after_previous=true must omit run_at".to_string());
-            }
             normalized[index - 1].run_at
+        } else if let Some(predecessor_id) = draft.continue_from_task_id.as_deref() {
+            continuation_reset_at(predecessor_id, &draft.cwd)?
         } else {
             let value = draft
                 .run_at
@@ -1026,7 +1307,6 @@ fn normalize_drafts(drafts: &[TaskDraft]) -> Result<Vec<NormalizedDraft>, String
             timezone,
             model,
             effort,
-            depends_on_previous: draft.after_previous,
         });
     }
     Ok(normalized)
@@ -1097,6 +1377,11 @@ fn row_to_batch(row: &Row<'_>) -> rusqlite::Result<Batch> {
         baseline_weekly_used_percent: row.get(9)?,
         allowance_points: row.get(10)?,
         consumed_points: row.get(11)?,
+        five_hour_cap_percent: row.get(12)?,
+        five_hour_window_reset_at: row.get(13)?,
+        baseline_five_hour_used_percent: row.get(14)?,
+        five_hour_allowance_points: row.get(15)?,
+        five_hour_consumed_points: row.get(16)?,
     })
 }
 
@@ -1122,6 +1407,7 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         run_at_iso,
         position: row.get(15)?,
         depends_on_task_id: row.get(16)?,
+        dependency_type: row.get(17)?,
         timezone,
         difficulty: row.get(8)?,
         model: row.get(9)?,
@@ -1155,6 +1441,13 @@ fn add_column_if_missing(
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn read_transcript_excerpt(path: &str) -> Option<String> {
+    const MAX_BYTES: usize = 16 * 1024;
+    let content = fs::read(path).ok()?;
+    let start = content.len().saturating_sub(MAX_BYTES);
+    Some(String::from_utf8_lossy(&content[start..]).into_owned())
 }
 
 fn backfill_run_token_usage(connection: &Connection) -> Result<(), String> {
@@ -1264,6 +1557,7 @@ fn new_id(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::RateWindow;
     use chrono::Duration;
     #[test]
     fn rejects_bad_caps() {
@@ -1273,8 +1567,13 @@ mod tests {
             weekly_cap_percent: Some(0.0),
             token_cap: None,
             cap_percent: None,
+            five_hour_cap_percent: None,
             tasks: vec![],
         };
+        assert!(validate_batch_input(&input).is_err());
+
+        let mut input = sample_input("bad-five-hour-cap", 1.0);
+        input.five_hour_cap_percent = Some(0.0);
         assert!(validate_batch_input(&input).is_err());
     }
     #[test]
@@ -1308,6 +1607,7 @@ mod tests {
             weekly_cap_percent: Some(cap_percent),
             token_cap: None,
             cap_percent: None,
+            five_hour_cap_percent: None,
             tasks: vec![TaskDraft {
                 title: "test".into(),
                 prompt: "make a harmless change".into(),
@@ -1315,6 +1615,7 @@ mod tests {
                 cwd: "/tmp".into(),
                 run_at: Some(run_at),
                 after_previous: false,
+                continue_from_task_id: None,
                 timezone: Some("UTC".into()),
                 difficulty: Difficulty::Standard,
                 model: None,
@@ -1332,6 +1633,58 @@ mod tests {
         assert!(second.idempotent_replay);
         assert_eq!(first.batch.id, second.batch.id);
         assert_eq!(first.tasks[0].model, "gpt-5.6-terra");
+        assert_eq!(first.batch.five_hour_cap_percent, None);
+    }
+
+    #[test]
+    fn five_hour_cap_is_independent_per_batch_and_resets() {
+        let mut store = Store::in_memory().unwrap();
+        let mut first_input = sample_input("five-hour-first", 10.0);
+        first_input.five_hour_cap_percent = Some(5.0);
+        let mut second_input = sample_input("five-hour-second", 10.0);
+        second_input.five_hour_cap_percent = Some(5.0);
+        let first = store.schedule_batch(first_input).unwrap();
+        let second = store.schedule_batch(second_input).unwrap();
+
+        let first_budget = store
+            .ensure_five_hour_window(&first.batch.id, 20.0, 100)
+            .unwrap();
+        let second_budget = store
+            .ensure_five_hour_window(&second.batch.id, 20.0, 100)
+            .unwrap();
+        assert_eq!(first_budget.five_hour_allowance_points, 5.0);
+        assert_eq!(second_budget.five_hour_allowance_points, 5.0);
+
+        let consumed = store
+            .add_five_hour_consumption(&first.batch.id, 5.0)
+            .unwrap();
+        assert_eq!(consumed.five_hour_consumed_points, 5.0);
+        assert_eq!(
+            store
+                .batch(&second.batch.id)
+                .unwrap()
+                .unwrap()
+                .five_hour_consumed_points,
+            0.0
+        );
+
+        let reset = store
+            .ensure_five_hour_window(&first.batch.id, 10.0, 200)
+            .unwrap();
+        assert_eq!(reset.five_hour_allowance_points, 5.0);
+        assert_eq!(reset.five_hour_consumed_points, 0.0);
+    }
+
+    #[test]
+    fn five_hour_cap_is_clamped_by_global_reserve() {
+        let mut store = Store::in_memory().unwrap();
+        let mut input = sample_input("five-hour-reserve", 10.0);
+        input.five_hour_cap_percent = Some(20.0);
+        let created = store.schedule_batch(input).unwrap();
+        let budget = store
+            .ensure_five_hour_window(&created.batch.id, 85.0, 100)
+            .unwrap();
+        assert_eq!(budget.five_hour_allowance_points, 5.0);
     }
 
     #[test]
@@ -1553,6 +1906,199 @@ mod tests {
         assert_eq!(budget.allowance_points, 30.0);
     }
 
+    fn mark_quota_limited(
+        store: &Store,
+        task_id: &str,
+        status: &str,
+        reset_at: i64,
+        session_id: Option<&str>,
+        transcript_path: Option<&str>,
+    ) {
+        let snapshot = UsageSnapshot {
+            adapter: "test".into(),
+            captured_at: now_epoch(),
+            five_hour: RateWindow {
+                used_percent: 90.0,
+                remaining_percent: 10.0,
+                duration_minutes: 300,
+                resets_at: reset_at,
+            },
+            weekly: RateWindow {
+                used_percent: 20.0,
+                remaining_percent: 80.0,
+                duration_minutes: 10_080,
+                resets_at: reset_at + 10_000,
+            },
+        };
+        let usage = serde_json::to_string(&snapshot).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO runs
+                 (id,task_id,started_at,finished_at,status,usage_before_json,usage_after_json,session_id,transcript_path)
+                 VALUES (?1,?2,?3,?3,?4,?5,?5,?6,?7)",
+                params![
+                    new_id("continuation-run"),
+                    task_id,
+                    now_epoch(),
+                    status,
+                    usage,
+                    session_id,
+                    transcript_path
+                ],
+            )
+            .unwrap();
+        store.set_status(task_id, status, Some("quota")).unwrap();
+    }
+
+    fn continuation_input(key: &str, predecessor_id: &str) -> ScheduleBatchInput {
+        let mut input = sample_input(key, 1.0);
+        input.tasks[0].run_at = None;
+        input.tasks[0].continue_from_task_id = Some(predecessor_id.to_string());
+        input
+    }
+
+    #[test]
+    fn cross_batch_continuation_uses_reset_and_session_context() {
+        let mut store = Store::in_memory().unwrap();
+        let predecessor = store
+            .schedule_batch(sample_input("continuation-source", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        let reset_at = now_epoch() + 600;
+        mark_quota_limited(
+            &store,
+            &predecessor.id,
+            "quota_interrupted",
+            reset_at,
+            Some("session-123"),
+            Some("/tmp/transcript.jsonl"),
+        );
+
+        let successor = store
+            .schedule_batch(continuation_input("continuation-target", &predecessor.id))
+            .unwrap();
+        let task = &successor.tasks[0];
+        assert_ne!(successor.batch.id, predecessor.batch_id);
+        assert_eq!(task.run_at, reset_at);
+        assert_eq!(
+            task.depends_on_task_id.as_deref(),
+            Some(predecessor.id.as_str())
+        );
+        assert_eq!(task.dependency_type, "quota_reset");
+        let context = store.continuation_context(task).unwrap().unwrap();
+        assert_eq!(context.session_id.as_deref(), Some("session-123"));
+        assert_eq!(
+            context.transcript_path.as_deref(),
+            Some("/tmp/transcript.jsonl")
+        );
+    }
+
+    #[test]
+    fn passed_continuation_reset_is_immediately_due() {
+        let mut store = Store::in_memory().unwrap();
+        let predecessor = store
+            .schedule_batch(sample_input("passed-reset-source", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        mark_quota_limited(
+            &store,
+            &predecessor.id,
+            "quota_skipped",
+            now_epoch() - 60,
+            None,
+            None,
+        );
+        let successor = store
+            .schedule_batch(continuation_input("passed-reset-target", &predecessor.id))
+            .unwrap();
+        assert!(successor.tasks[0].run_at <= now_epoch());
+        assert!(store
+            .due_tasks(now_epoch())
+            .unwrap()
+            .iter()
+            .any(|task| task.id == successor.tasks[0].id));
+    }
+
+    #[test]
+    fn continuation_can_be_deferred_to_next_reset() {
+        let mut store = Store::in_memory().unwrap();
+        let predecessor = store
+            .schedule_batch(sample_input("defer-source", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        mark_quota_limited(
+            &store,
+            &predecessor.id,
+            "quota_interrupted",
+            now_epoch() - 60,
+            None,
+            None,
+        );
+        let successor = store
+            .schedule_batch(continuation_input("defer-target", &predecessor.id))
+            .unwrap();
+        let task_id = &successor.tasks[0].id;
+        assert!(store.claim_task(task_id).unwrap());
+        let next_reset = now_epoch() + 600;
+        store
+            .defer_continuation(task_id, next_reset, "still reserved")
+            .unwrap();
+        let deferred = store.task(task_id).unwrap().unwrap();
+        assert_eq!(deferred.status, "scheduled");
+        assert_eq!(deferred.run_at, next_reset);
+        assert_eq!(deferred.last_error.as_deref(), Some("still reserved"));
+    }
+
+    #[test]
+    fn continuation_rejects_unknown_and_non_quota_predecessors() {
+        let mut store = Store::in_memory().unwrap();
+        let unknown = continuation_input("unknown-source", "missing");
+        assert!(store.schedule_batch(unknown).is_err());
+
+        let predecessor = store
+            .schedule_batch(sample_input("failed-source", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        store
+            .set_status(&predecessor.id, "failed", Some("test"))
+            .unwrap();
+        let error = store
+            .schedule_batch(continuation_input("failed-target", &predecessor.id))
+            .unwrap_err();
+        assert!(error.contains("quota_interrupted or quota_skipped"));
+    }
+
+    #[test]
+    fn continuation_cannot_move_to_another_worktree() {
+        let mut store = Store::in_memory().unwrap();
+        let predecessor = store
+            .schedule_batch(sample_input("fixed-worktree-source", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        mark_quota_limited(
+            &store,
+            &predecessor.id,
+            "quota_interrupted",
+            now_epoch() + 600,
+            None,
+            None,
+        );
+        let successor = store
+            .schedule_batch(continuation_input("fixed-worktree-target", &predecessor.id))
+            .unwrap();
+        let update = TaskUpdate {
+            cwd: Some("/".into()),
+            ..TaskUpdate::default()
+        };
+        assert!(store.update_task(&successor.tasks[0].id, update).is_err());
+    }
+
     #[test]
     fn chained_task_waits_for_previous_success() {
         let mut input = sample_input("chain", 1.0);
@@ -1563,6 +2109,7 @@ mod tests {
             cwd: "/tmp".into(),
             run_at: None,
             after_previous: true,
+            continue_from_task_id: None,
             timezone: Some("UTC".into()),
             difficulty: Difficulty::Simple,
             model: None,
@@ -1602,6 +2149,7 @@ mod tests {
             cwd: "/tmp".into(),
             run_at: None,
             after_previous: true,
+            continue_from_task_id: None,
             timezone: Some("UTC".into()),
             difficulty: Difficulty::Simple,
             model: None,
@@ -1680,8 +2228,11 @@ mod tests {
         let batch = store.batch("b").unwrap().unwrap();
         assert_eq!(batch.budget_mode, "percentage");
         assert_eq!(batch.cap_basis, "remaining_percent");
+        assert_eq!(batch.five_hour_cap_percent, None);
+        assert_eq!(batch.five_hour_consumed_points, 0.0);
         let task = store.task("t").unwrap().unwrap();
         assert_eq!(task.position, 0);
         assert_eq!(task.depends_on_task_id, None);
+        assert_eq!(task.dependency_type, "success");
     }
 }

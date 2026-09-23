@@ -144,7 +144,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         tool("usage_snapshot", "Read current rolling five-hour and weekly Codex usage. Fails closed on ambiguous telemetry.", json!({"type":"object","properties":{},"additionalProperties":false}), true),
         tool("setup_service", "Install and start the native user background service. Requires explicit approval. LimitWise is tested only on Linux x86-64; macOS, including Apple Silicon, is untested.", json!({"type":"object","properties":{},"additionalProperties":false}), false),
-        tool("schedule_batch", "Create a confirmed one-off or sequential task batch with a percentage or token budget. Never call while in Plan mode.", json!({
+        tool("schedule_batch", "Create a confirmed one-off, sequential, or quota-reset continuation batch with a percentage or token budget and optional five-hour cap. Never call while in Plan mode.", json!({
             "type":"object", "required":["idempotency_key","budget_mode","tasks"], "additionalProperties":false,
             "oneOf":[
                 {"properties":{"budget_mode":{"const":"percentage"}},"required":["weekly_cap_percent"],"not":{"required":["token_cap"]}},
@@ -155,17 +155,20 @@ fn tool_definitions() -> Vec<Value> {
                 "budget_mode":{"type":"string","enum":["percentage","tokens"],"description":"Choose percentage for a per-weekly-window allowance or tokens for one total batch token cap."},
                 "weekly_cap_percent":{"type":"number","exclusiveMinimum":0,"maximum":100,"description":"Maximum percentage points from the full weekly limit for this batch in each weekly window; 1 means exactly 1% of the total weekly limit."},
                 "token_cap":{"type":"integer","minimum":1,"maximum":1000000000,"description":"Maximum total input plus output tokens for the entire batch. Cached input tokens are included; reasoning tokens are already included in output tokens."},
+                "five_hour_cap_percent":{"type":"number","exclusiveMinimum":0,"maximum":100,"description":"Optional maximum percentage points this batch may consume in each provider 5-hour window. The global 10% reserve still applies."},
                 "tasks":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,
                     "required":["title","prompt","cwd","difficulty"],
                     "oneOf":[
                         {"required":["run_at"]},
-                        {"required":["after_previous"],"properties":{"after_previous":{"const":true}}}
+                        {"required":["after_previous"],"properties":{"after_previous":{"const":true}}},
+                        {"required":["continue_from_task_id"]}
                     ],
                     "properties":{
                         "title":{"type":"string"}, "prompt":{"type":"string"}, "success_criteria":{"type":"string"},
                         "cwd":{"type":"string","description":"Absolute existing project directory"},
                         "run_at":{"type":"string","description":"Exact future local timestamp in RFC3339 form with explicit UTC offset. Required unless after_previous is true; relative times are not accepted."},
                         "after_previous":{"type":"boolean","default":false,"description":"When true, omit run_at and start only after the immediately preceding task completes successfully."},
+                        "continue_from_task_id":{"type":"string","minLength":1,"description":"Continue quota-limited unfinished work from this quota_interrupted or quota_skipped task after its provider 5-hour reset. Omit run_at and after_previous."},
                         "timezone":{"type":"string","description":"IANA timezone; defaults to system timezone"},
                         "difficulty":{"type":"string","enum":["simple","standard","complex","exceptional"]},
                         "model":{"type":"string","enum":["gpt-5.6-luna","gpt-5.6-terra","gpt-5.6-sol"]},
@@ -252,9 +255,15 @@ mod tests {
         assert!(schema.pointer("/properties/budget_mode").is_some());
         assert!(schema.pointer("/properties/weekly_cap_percent").is_some());
         assert!(schema.pointer("/properties/token_cap").is_some());
+        assert!(schema
+            .pointer("/properties/five_hour_cap_percent")
+            .is_some());
         assert!(schema.pointer("/properties/cap_percent").is_none());
         assert!(schema
             .pointer("/properties/tasks/items/properties/after_previous")
+            .is_some());
+        assert!(schema
+            .pointer("/properties/tasks/items/properties/continue_from_task_id")
             .is_some());
     }
 

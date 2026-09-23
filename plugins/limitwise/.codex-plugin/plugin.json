@@ -1,10 +1,13 @@
 {
   "name": "limitwise",
-  "version": "0.5.0+codex.20260903161500",
+  "version": "0.5.0",
   "description": "Quota-aware Codex task scheduling with terse default replies. Tested only on Linux x86-64; macOS and Apple Silicon are untested.",
   "author": {
-    "name": "LimitWise contributors"
+    "name": "LimitWise contributors",
+    "url": "https://github.com/aarsht7"
   },
+  "homepage": "https://aarsht7.github.io/limitwise/",
+  "repository": "https://github.com/aarsht7/limitwise",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -19,6 +22,9 @@
     "longDescription": "Plan Codex tasks with terse default replies, predict likely and conservative usage from local run history, warn about tight caps, execute at exact local times or after preceding tasks under a percentage or token budget, and inspect stored token history while preserving weekly and rolling five-hour quota reserves. LimitWise has only been tested on Linux x86-64; macOS, including Apple Silicon, and other architectures are untested.",
     "developerName": "LimitWise contributors",
     "category": "Productivity",
+    "websiteURL": "https://aarsht7.github.io/limitwise/",
+    "privacyPolicyURL": "https://github.com/aarsht7/limitwise/blob/main/plugins/limitwise/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/aarsht7/limitwise/blob/main/plugins/limitwise/TERMS.md",
     "capabilities": [
       "Interactive",
       "Write"
@@ -28,7 +34,12 @@
       "Show my scheduled LimitWise tasks.",
       "Check my Codex usage before scheduling."
     ],
-    "brandColor": "#2E7D6E"
+    "brandColor": "#2E7D6E",
+    "composerIcon": "./assets/limitwise-mark.svg",
+    "logo": "./assets/limitwise-mark.svg",
+    "screenshots": [
+      "./assets/limitwise-docs.png"
+    ]
   },
   "mcpServers": "./.mcp.json"
 }
