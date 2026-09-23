@@ -32,14 +32,14 @@ jobs:
         if: runner.os == 'macOS'
         with:
           targets: ${{ matrix.target }}
-      - name: Test and build Linux against GLIBC 2.31
+      - name: Test and build Linux with stable Rust against GLIBC 2.31
         if: runner.os == 'Linux'
         run: |
           docker run --rm \
             -e TARGET="${{ matrix.target }}" \
             -v "$PWD:/work" \
             -w /work \
-            rust:1.71-bullseye \
+            rust:bullseye \
             sh -c 'rustup target add "$TARGET" && cargo test --locked --all --target "$TARGET" && cargo build --locked --release --target "$TARGET"'
       - name: Verify Linux GLIBC baseline
         if: runner.os == 'Linux'

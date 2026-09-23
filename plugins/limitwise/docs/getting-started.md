@@ -24,7 +24,7 @@ Optional but useful during setup:
 
 - `systemctl` on Linux if you want a background service;
 - `launchctl` on macOS if you want a background service;
-- Rust 1.71+ only if you want to build from source.
+- Rust 1.85+ only if you want to build from source.
 
 Quick preflight checks:
 
@@ -91,7 +91,7 @@ This method does not install a prebuilt `limitwise` binary and does not set up t
 
 ### Method 3: Build from source
 
-Rust 1.71 or newer is required. From `plugins/limitwise`:
+Rust 1.85 or newer is required. From `plugins/limitwise`:
 
 ```sh
 cargo build --release

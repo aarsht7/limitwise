@@ -51,7 +51,7 @@ codex plugin add limitwise@limitwise
 
 That direct flow does not install a prebuilt binary or background service.
 
-If you need a local machine-compatible binary, build from source with Rust 1.71+ (see [getting-started guide](docs/getting-started.md)).
+If you need a local machine-compatible binary, build from source with Rust 1.85+ (see [getting-started guide](docs/getting-started.md)).
 
 Quick verification after install:
 

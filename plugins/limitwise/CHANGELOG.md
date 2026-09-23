@@ -4,7 +4,12 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-09-23
+
 - Accept checksum filenames with or without a leading `./`, and emit bare filenames in future release checksum manifests.
+- Build Linux releases with current stable Rust inside the fixed GLIBC 2.31 environment.
+- Raise the source-build minimum to Rust 1.85 for Rust 2024 dependency manifests.
+- Test the declared minimum Rust version on every pull request and push to `main`.
 
 ## 0.6.0 - 2026-09-23
 

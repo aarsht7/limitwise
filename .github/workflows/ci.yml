@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  minimum-rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/limitwise
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test declared minimum Rust version
+        shell: bash
+        run: |
+          set -euo pipefail
+          minimum_rust="$(sed -n 's/^rust-version = "\([^"]*\)"/\1/p' Cargo.toml)"
+          test -n "$minimum_rust"
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            "rust:${minimum_rust}-bullseye" \
+            cargo test --locked --all
