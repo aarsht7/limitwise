@@ -9,7 +9,7 @@ title: Getting started
 
 ## Docs menu
 
-[Home](index.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
+[Home](index.md) | [Demos](demos.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Local browser UI](local-browser-ui.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
 
 ## Before you begin
 

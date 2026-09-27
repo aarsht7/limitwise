@@ -9,7 +9,29 @@ permissions:
   contents: read
 
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/limitwise/ui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.11.0
+          cache: npm
+          cache-dependency-path: plugins/limitwise/ui/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Verify embedded asset outputs
+        run: test -s dist/index.html -a -s dist/assets/app.js -a -s dist/assets/app.css
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+
   minimum-rust:
+    needs: frontend
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -27,3 +49,11 @@ jobs:
             -w /work \
             "rust:${minimum_rust}-bullseye" \
             cargo test --locked --all
+
+  retry-resume-e2e:
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run immutable retry/resume fake-Codex E2E
+        run: ./plugins/limitwise/scripts/retry-resume-smoke.sh

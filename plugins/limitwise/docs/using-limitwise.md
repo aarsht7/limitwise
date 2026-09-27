@@ -9,7 +9,7 @@ title: Using LimitWise
 
 ## Docs menu
 
-[Home](index.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
+[Home](index.md) | [Demos](demos.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Local browser UI](local-browser-ui.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
 
 ## Schedule a task
 
@@ -20,7 +20,8 @@ Always prepare schedules in Plan mode. Give Codex:
 - the IANA timezone, such as `Europe/Paris` or `America/New_York`;
 - the work to perform;
 - a clear success condition;
-- a percentage or token budget.
+- a percentage or token budget;
+- a permission profile, if the default `restricted` profile is not appropriate;
 - optionally, a five-hour batch cap.
 
 Example:
@@ -38,9 +39,35 @@ Update the project README with setup instructions.
 Success: the README contains installation and usage sections.
 ```
 
-LimitWise reads current quota, inspects the project, chooses a model and reasoning effort, and estimates usage when enough local history exists. It then shows one proposal for review.
+LimitWise reads current quota and the installed Codex app-server's visible model catalog, inspects the project, chooses a supported model/effort pair, and estimates usage when enough local history exists. Manual selectors show only the reasoning efforts supported by the selected model. It then shows one proposal for review.
 
 Nothing is scheduled in Plan mode. After you confirm the proposal, leave Plan mode and say `Create this confirmed schedule.`
+
+## Choose a permission profile
+
+`restricted` is the default for old and new clients. It uses `workspace-write` with network off and web search disabled.
+
+`networked` enables network access and live web search. Selecting it requires a separate explicit acknowledgement in addition to the normal schedule or retry confirmation. It still uses `workspace-write`, disables external apps, and sets approval policy to `never`. It cannot enable `danger-full-access`, another sandbox, arbitrary command arguments, external apps, or interactive approval.
+
+Retries inherit the source task profile unless you confirm a change. A stored task profile can be updated only before the task starts.
+
+## Diagnose LimitWise without changing it
+
+Run the human-readable report:
+
+```sh
+limitwise doctor
+```
+
+For scripts, request the versioned JSON contract:
+
+```sh
+limitwise doctor --json
+```
+
+Exit `0` means LimitWise is usable, including reports with warnings. Exit `1` means one or more checks failed. Exit `2` means the arguments were invalid or the diagnostic report could not be created. The equivalent read-only MCP tool is `diagnostics_snapshot {}`.
+
+Doctor inspects existing state only. It does not create directories or databases, migrate SQLite, install or restart the service, or install or refresh the plugin. Diagnostic evidence is redacted and daemon logs are returned only as bounded error categories, never as raw log, prompt, or transcript content.
 
 ## Use terse mode
 
@@ -83,7 +110,7 @@ Use this when you want a concrete token ceiling. Token totals become available w
 
 ### Optional five-hour budget
 
-`five_hour_cap_percent` limits one batch's consumption in each provider five-hour window. For example, `5` allows at most five percentage points in that window, still bounded by the global 10% reserve. The allowance resets when the provider window resets. Omit this field when only the global reserve should apply.
+`five_hour_cap_percent` limits one batch's consumption in each provider five-hour window. For example, `5` allows at most five percentage points in that window, still bounded by the global 10% reserve. The allowance resets when the provider window resets. Omit this field when only the global reserve should apply. If five-hour telemetry is missing, LimitWise warns and continues with the weekly limit or token budget; neither this cap nor the global reserve can be enforced until the window returns.
 
 ## Chain tasks
 
@@ -102,13 +129,18 @@ Update the documentation.
 
 If one task does not complete successfully, the next task is marked `blocked` and does not run.
 
-## Continue quota-limited work
+## Retry or resume an immutable task
 
-Only a task in `quota_interrupted` or `quota_skipped` state can be continued. Plan and confirm a new batch whose first task uses `continue_from_task_id: TASK_ID` instead of `run_at` or `after_previous`.
+Task detail exposes exactly one action when the source is eligible:
 
-LimitWise uses the predecessor's recorded five-hour reset time. A past reset makes the task immediately eligible. The new batch gets its own weekly or token budget and optional five-hour cap. LimitWise resumes the predecessor's Codex session when supported and available; otherwise, it starts fresh with the predecessor ID, prompt, transcript path, bounded transcript excerpt, and existing worktree context.
+- `quota_interrupted` or `quota_skipped`: **Continue after quota reset**. The run time comes from the stored provider reset; a passed reset is immediately eligible. LimitWise resumes the source Codex session when supported and available, otherwise it starts fresh with the stored predecessor/transcript/worktree context.
+- `failed`, `blocked`, `missed`, or `cancelled`: **Retry as new run**. You must choose a future RFC3339 run time. This always starts a fresh Codex session and never imports session or transcript fallback context.
 
-No successor is created automatically. Ordinary failure, cancellation, blocking, missing quota snapshots, a different worktree, and invalid dependency chains are rejected. If the global reserve remains exhausted at reset, the existing continuation is deferred to the next provider reset.
+`completed`, `scheduled`, and `running` tasks have no retry action. Every action requires a fresh percentage or token budget, permits a confirmed model/effort selection, previews copied fields, attempt number, execution/reset time, resume/fallback behavior, and the current local estimate, then requires explicit confirmation. The global 10% rolling five-hour reserve remains unchanged whenever that telemetry is available.
+
+Confirmation atomically creates a new batch/task with `source_task_id`, `attempt_kind`, and the next `attempt_number`. The source task and all source run records remain immutable. Repeating a confirmation with the same idempotency key returns the same attempt. No successor is created automatically. Missing or invalid quota metadata rejects quota resume; if the reserve is still exhausted when a confirmed quota resume becomes due, that same new attempt is deferred to the next provider reset.
+
+Existing `schedule_batch` clients using `continue_from_task_id` remain compatible, but the GUI uses the explicit preview/confirm retry flow.
 
 ## Manage tasks
 
@@ -125,8 +157,13 @@ Ask Codex outside Plan mode:
 | Check quota | `Show current five-hour and weekly usage, remaining quota, and reset times.` |
 | Check token history | `Show LimitWise token stats for the last year, month, week, each of the last seven days, and each recent run.` |
 | Estimate work | `Estimate usage for these tasks and warn me if this cap looks too low: ...` |
+| Preview a retry | `Preview a fresh retry for task TASK_ID at 2026-09-05T12:00:00+02:00 with a 1% weekly budget.` |
+| Preview quota resume | `Preview continuing quota-limited task TASK_ID with a fresh 1% weekly budget.` |
+| Confirm a new attempt | `Confirm the previewed retry/resume for task TASK_ID exactly once.` |
 
 Only a task still marked `scheduled` can be changed or cancelled. A success-chained task has no clock time to change, but its prompt, success condition, project, model, and effort can be changed before it starts. A quota-reset continuation must remain in its predecessor worktree.
+
+The browser dashboard groups every composer-created chain by batch. Before the first task starts, choose **Edit batch…** to change or reorder tasks, add tasks, or remove tasks. LimitWise pauses the first task while the editor stays connected. If the start time passes during editing, change it to a future RFC3339 time before saving; the server will reject an expired time. Save applies the whole revised chain atomically.
 
 ## Understand statuses
 

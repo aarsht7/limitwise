@@ -1,0 +1,69 @@
+name: Issue report
+description: Report a problem or suggest an improvement
+title: "[Issue]: "
+body:
+  - type: dropdown
+    id: type
+    attributes:
+      label: Issue type
+      options:
+        - Bug
+        - Feature request
+        - Documentation
+        - Question
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What is the issue?
+      description: Briefly explain what you were trying to do and what went wrong or could be improved.
+      placeholder: I was trying to... but...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest set of steps that shows the issue. Skip this if it is not a bug.
+      placeholder: |
+        1. Open...
+        2. Select...
+        3. See...
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      placeholder: I expected...
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs or screenshots
+      description: Add any useful error messages, logs, or screenshots. Remove secrets and personal information first.
+      placeholder: Drag screenshots here or paste relevant logs inside a code block.
+
+  - type: input
+    id: version
+    attributes:
+      label: LimitWise version
+      description: Run `limitwise --version` if available.
+      placeholder: e.g. 1.0.0
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your operating system and Codex version.
+      placeholder: e.g. Ubuntu 24.04, Codex 1.2.3
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Add any context that may help us understand or prioritize the issue.

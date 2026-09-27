@@ -28,6 +28,19 @@ jobs:
         working-directory: plugins/limitwise
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.11.0
+          cache: npm
+          cache-dependency-path: plugins/limitwise/ui/package-lock.json
+      - name: Build embedded browser UI
+        working-directory: plugins/limitwise/ui
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+          test -s dist/index.html -a -s dist/assets/app.js -a -s dist/assets/app.css
       - uses: dtolnay/rust-toolchain@stable
         if: runner.os == 'macOS'
         with:
@@ -62,6 +75,34 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo build --locked --release --target "${{ matrix.target }}"
       - run: ./scripts/package-release.sh "${{ matrix.target }}" dist
+      - name: Verify packaged UI from embedded binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dist/limitwise-${{ matrix.target }}.tar.gz"
+          package_root="$(mktemp -d)"
+          trap 'rm -rf "$package_root"' EXIT
+          tar -xzf "$archive" -C "$package_root"
+          ./scripts/ui-packaged-smoke.sh "$package_root/limitwise/bin/limitwise"
+      - name: Install packaged-UI browser
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        working-directory: plugins/limitwise/ui
+        run: |
+          if [ "${{ runner.os }}" = Linux ]; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
+      - name: Run packaged-browser E2E
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_root="$(mktemp -d)"
+          trap 'rm -rf "$package_root"' EXIT
+          tar -xzf "dist/limitwise-${{ matrix.target }}.tar.gz" -C "$package_root"
+          cd ui
+          LIMITWISE_UI_BINARY="$package_root/limitwise/bin/limitwise" npx playwright test e2e/packaged.spec.ts
       - uses: actions/upload-artifact@v7
         with:
           name: limitwise-${{ matrix.target }}

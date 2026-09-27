@@ -3,7 +3,9 @@ use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex};
 use std::thread;
@@ -11,6 +13,7 @@ use std::time::{Duration, Instant};
 
 const ADAPTER_VERSION: &str = "codex-app-server-v1";
 const REQUEST_TIMEOUT_SECONDS: u64 = 15;
+const MISSING_FIVE_HOUR_WARNING: &str = "5-hour quota telemetry is unavailable; continuing with the configured weekly limit or token budget; the global reserve and any 5-hour batch cap cannot be enforced";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct RateWindow {
@@ -24,13 +27,17 @@ pub struct RateWindow {
 pub struct UsageSnapshot {
     pub adapter: String,
     pub captured_at: i64,
-    pub five_hour: RateWindow,
+    pub five_hour: Option<RateWindow>,
     pub weekly: RateWindow,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
 pub struct UsageClient {
     timeout: Duration,
+    binary: PathBuf,
+    environment: Vec<(OsString, OsString)>,
     session: Mutex<Option<AppServer>>,
 }
 
@@ -46,19 +53,38 @@ impl Default for UsageClient {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(REQUEST_TIMEOUT_SECONDS),
+            binary: codex_binary(),
+            environment: Vec::new(),
             session: Mutex::new(None),
         }
     }
 }
 
 impl UsageClient {
+    pub(crate) fn for_diagnostics(
+        binary: PathBuf,
+        timeout: Duration,
+        environment: Vec<(OsString, OsString)>,
+    ) -> Self {
+        Self {
+            timeout,
+            binary,
+            environment,
+            session: Mutex::new(None),
+        }
+    }
+
     pub fn fetch(&self) -> Result<UsageSnapshot, String> {
         let mut guard = self
             .session
             .lock()
             .map_err(|_| "quota adapter lock poisoned".to_string())?;
         if guard.is_none() {
-            *guard = Some(AppServer::start(self.timeout)?);
+            *guard = Some(AppServer::start(
+                &self.binary,
+                self.timeout,
+                &self.environment,
+            )?);
         }
         let result = guard
             .as_mut()
@@ -72,9 +98,16 @@ impl UsageClient {
 }
 
 impl AppServer {
-    fn start(timeout: Duration) -> Result<Self, String> {
-        let mut child = Command::new(codex_binary())
+    fn start(
+        binary: &Path,
+        timeout: Duration,
+        environment: &[(OsString, OsString)],
+    ) -> Result<Self, String> {
+        let mut command = Command::new(binary);
+        command
             .args(["app-server", "--listen", "stdio://"])
+            .envs(environment.iter().cloned());
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -192,8 +225,8 @@ pub fn snapshot_from_value(value: &Value) -> Result<UsageSnapshot, String> {
         .filter(|window| window.duration_minutes == 300)
         .cloned()
         .collect();
-    if five_hour.len() != 1 {
-        return Err("5-hour quota telemetry is missing or ambiguous".to_string());
+    if five_hour.len() > 1 {
+        return Err("5-hour quota telemetry is ambiguous".to_string());
     }
     let longest = candidates
         .iter()
@@ -209,11 +242,17 @@ pub fn snapshot_from_value(value: &Value) -> Result<UsageSnapshot, String> {
     if weekly.len() != 1 {
         return Err("weekly quota telemetry is ambiguous".to_string());
     }
+    let warnings = if five_hour.is_empty() {
+        vec![MISSING_FIVE_HOUR_WARNING.to_string()]
+    } else {
+        Vec::new()
+    };
     Ok(UsageSnapshot {
         adapter: ADAPTER_VERSION.to_string(),
         captured_at: crate::store::now_epoch(),
-        five_hour: five_hour[0].clone(),
+        five_hour: five_hour.into_iter().next(),
         weekly: weekly[0].clone(),
+        warnings,
     })
 }
 
@@ -285,18 +324,34 @@ mod tests {
             }
         });
         let snapshot = snapshot_from_value(&input).unwrap();
-        assert_eq!(snapshot.five_hour.duration_minutes, 300);
+        assert_eq!(snapshot.five_hour.unwrap().duration_minutes, 300);
         assert_eq!(snapshot.weekly.remaining_percent, 60.0);
     }
 
     #[test]
-    fn telemetry_fails_closed_when_missing_or_ambiguous() {
+    fn missing_five_hour_telemetry_preserves_weekly_snapshot() {
+        let weekly_only = json!({
+            "rateLimits": {
+                "secondary": {"usedPercent": 40.0, "windowDurationMins": 10080, "resetsAt": 20}
+            }
+        });
+        let snapshot = snapshot_from_value(&weekly_only).unwrap();
+        assert_eq!(snapshot.five_hour, None);
+        assert_eq!(snapshot.weekly.remaining_percent, 60.0);
+        assert_eq!(snapshot.warnings, [MISSING_FIVE_HOUR_WARNING]);
+    }
+
+    #[test]
+    fn telemetry_fails_closed_when_weekly_is_missing_or_five_hour_is_ambiguous() {
         assert!(snapshot_from_value(&json!({})).is_err());
         let ambiguous = json!({
             "a": {"usedPercent": 1.0, "windowDurationMins": 300, "resetsAt": 1},
             "b": {"usedPercent": 2.0, "windowDurationMins": 300, "resetsAt": 2},
             "w": {"usedPercent": 2.0, "windowDurationMins": 10080, "resetsAt": 3}
         });
-        assert!(snapshot_from_value(&ambiguous).is_err());
+        assert_eq!(
+            snapshot_from_value(&ambiguous).unwrap_err(),
+            "5-hour quota telemetry is ambiguous"
+        );
     }
 }

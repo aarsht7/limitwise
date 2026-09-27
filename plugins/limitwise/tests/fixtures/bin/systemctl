@@ -1,2 +1,7 @@
 #!/bin/sh
+[ "${LIMITWISE_DOCTOR_SCENARIO:-}" != "service_unavailable" ] || {
+  printf '%s\n' 'Failed to connect to bus: Operation not permitted' >&2
+  exit 1
+}
+[ "${LIMITWISE_DOCTOR_SCENARIO:-}" != "service_stopped" ] || exit 3
 exit 0

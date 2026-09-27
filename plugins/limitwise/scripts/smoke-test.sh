@@ -15,6 +15,7 @@ env LIMITWISE_HOME="$smoke_root/home" XDG_DATA_HOME="$smoke_root/data" PATH="$fa
   "$root/target/debug/limitwise" setup >/dev/null
 test -x "$smoke_root/data/limitwise/bin/limitwise"
 test -f "$smoke_root/home/.config/systemd/user/limitwise.service"
+grep -q '^Environment="LIMITWISE_CODEX_PATH=/' "$smoke_root/home/.config/systemd/user/limitwise.service"
 if command -v systemd-analyze >/dev/null 2>&1; then
   if ! systemd-analyze verify "$smoke_root/home/.config/systemd/user/limitwise.service" >"$smoke_root/systemd-verify.log" 2>&1; then
     sed -n '1,160p' "$smoke_root/systemd-verify.log" >&2
@@ -36,10 +37,13 @@ env LIMITWISE_HOME="$smoke_root/home" XDG_DATA_HOME="$smoke_root/data" \
   "$root/target/debug/limitwise" daemon --once
 
 test -f "$fake_args"
-grep -q 'gpt-5.6-terra' "$fake_args"
-grep -q 'gpt-5.6-luna' "$fake_args"
+grep -q 'gpt-6-sol' "$fake_args"
+grep -q 'gpt-6-luna' "$fake_args"
 grep -q 'model_reasoning_effort="medium"' "$fake_args"
 grep -q 'approval_policy="never"' "$fake_args"
+grep -q 'sandbox_workspace_write.network_access=false' "$fake_args"
+grep -q 'web_search="disabled"' "$fake_args"
+grep -q 'features.apps=false' "$fake_args"
 grep -q 'workspace-write' "$fake_args"
 grep -q 'keep final summaries terse' "$fake_args"
 grep -q 'do not use network or external apps' "$fake_args"
@@ -50,6 +54,7 @@ task_output=$(printf '%s\n' \
   | env LIMITWISE_HOME="$smoke_root/home" XDG_DATA_HOME="$smoke_root/data" "$root/target/debug/limitwise" mcp \
 )
 printf '%s\n' "$task_output" | grep -q '"depends_on_task_id":"task-'
+printf '%s\n' "$task_output" | grep -q '"permission_profile":"restricted"'
 completed_count=$(printf '%s\n' "$task_output" | grep -o '"status":"completed"' | wc -l)
 test "$completed_count" -eq 3
 quota_skipped_count=$(printf '%s\n' "$task_output" | grep -o '"status":"quota_skipped"' | wc -l)
