@@ -65,9 +65,40 @@ pub fn poll_seconds() -> u64 {
 }
 
 pub fn codex_binary() -> PathBuf {
-    env::var_os("LIMITWISE_CODEX_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("codex"))
+    let override_path = env::var_os("LIMITWISE_CODEX_PATH").map(PathBuf::from);
+    let search_path = env::var_os("PATH");
+    let home = home_dir().ok();
+    discover_codex_binary(override_path, search_path.as_deref(), home.as_deref())
+}
+
+fn discover_codex_binary(
+    override_path: Option<PathBuf>,
+    search_path: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+) -> PathBuf {
+    if let Some(path) = override_path {
+        return path;
+    }
+    if let Some(path) = search_path.and_then(find_binary_on_path) {
+        return path;
+    }
+    if let Some(home) = home {
+        for candidate in [
+            home.join(".local/bin/codex"),
+            home.join(".codex/packages/standalone/current/bin/codex"),
+        ] {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("codex")
+}
+
+fn find_binary_on_path(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    env::split_paths(path)
+        .map(|directory| directory.join("codex"))
+        .find(|candidate| candidate.is_file())
 }
 
 pub fn system_timezone() -> String {
@@ -105,4 +136,50 @@ pub fn set_private_dir(path: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 pub fn set_private_dir(_path: &Path) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn finds_codex_in_an_explicit_path_without_shell_startup_files() {
+        let root = env::temp_dir().join(format!(
+            "limitwise-codex-path-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let binary = root.join("codex");
+        fs::write(&binary, b"fixture").unwrap();
+
+        assert_eq!(find_binary_on_path(root.as_os_str()), Some(binary));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn falls_back_to_user_local_codex_when_service_path_is_minimal() {
+        let root = env::temp_dir().join(format!(
+            "limitwise-codex-home-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let local_bin = root.join(".local/bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        let binary = local_bin.join("codex");
+        fs::write(&binary, b"fixture").unwrap();
+
+        assert_eq!(
+            discover_codex_binary(None, Some(std::ffi::OsStr::new("/usr/bin")), Some(&root)),
+            binary
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

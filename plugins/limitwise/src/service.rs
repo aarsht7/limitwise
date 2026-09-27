@@ -1,4 +1,4 @@
-use crate::config::{home_dir, set_private_dir, Paths};
+use crate::config::{codex_binary, home_dir, set_private_dir, Paths};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,9 +13,9 @@ pub fn setup() -> Result<String, String> {
     }
 
     if cfg!(target_os = "macos") {
-        install_launch_agent(&paths)
+        install_launch_agent(&paths, &codex_binary())
     } else if cfg!(target_os = "linux") {
-        install_systemd_user_service(&paths)
+        install_systemd_user_service(&paths, &codex_binary())
     } else {
         Err("LimitWise setup supports Linux and macOS only".to_string())
     }
@@ -64,13 +64,13 @@ pub fn uninstall(purge: bool) -> Result<String, String> {
     }
 }
 
-fn install_systemd_user_service(paths: &Paths) -> Result<String, String> {
+fn install_systemd_user_service(paths: &Paths, codex: &Path) -> Result<String, String> {
     let unit_path = systemd_unit_path()?;
     let parent = unit_path
         .parent()
         .ok_or_else(|| "invalid systemd path".to_string())?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let unit = systemd_unit(&paths.installed_binary);
+    let unit = systemd_unit(&paths.installed_binary, codex);
     fs::write(&unit_path, unit).map_err(|e| e.to_string())?;
     run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
     run_checked(Command::new("systemctl").args(["--user", "enable", "limitwise.service"]))?;
@@ -81,13 +81,13 @@ fn install_systemd_user_service(paths: &Paths) -> Result<String, String> {
     ))
 }
 
-fn install_launch_agent(paths: &Paths) -> Result<String, String> {
+fn install_launch_agent(paths: &Paths, codex: &Path) -> Result<String, String> {
     let plist_path = launch_agent_path()?;
     let parent = plist_path
         .parent()
         .ok_or_else(|| "invalid LaunchAgent path".to_string())?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    fs::write(&plist_path, launch_agent_plist(paths)).map_err(|e| e.to_string())?;
+    fs::write(&plist_path, launch_agent_plist(paths, codex)).map_err(|e| e.to_string())?;
     let uid = unsafe { libc::getuid() };
     let domain = format!("gui/{uid}");
     let service = format!("{domain}/io.openai.limitwise");
@@ -105,19 +105,21 @@ fn install_launch_agent(paths: &Paths) -> Result<String, String> {
     ))
 }
 
-fn systemd_unit(binary: &Path) -> String {
+fn systemd_unit(binary: &Path, codex: &Path) -> String {
     format!(
-        "[Unit]\nDescription=LimitWise quota-aware Codex scheduler\n\n[Service]\nType=simple\nExecStart={} daemon\nRestart=on-failure\nRestartSec=5\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=default.target\n",
-        systemd_escape(binary)
+        "[Unit]\nDescription=LimitWise quota-aware Codex scheduler\n\n[Service]\nType=simple\nEnvironment={}\nExecStart={} daemon\nRestart=on-failure\nRestartSec=5\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=default.target\n",
+        systemd_escape_environment("LIMITWISE_CODEX_PATH", codex),
+        systemd_escape(binary),
     )
 }
 
-fn launch_agent_plist(paths: &Paths) -> String {
+fn launch_agent_plist(paths: &Paths, codex: &Path) -> String {
     let stdout = paths.logs_dir.join("daemon.stdout.log");
     let stderr = paths.logs_dir.join("daemon.stderr.log");
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>Label</key><string>io.openai.limitwise</string>\n  <key>ProgramArguments</key><array><string>{}</string><string>daemon</string></array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Background</string>\n  <key>StandardOutPath</key><string>{}</string>\n  <key>StandardErrorPath</key><string>{}</string>\n</dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>Label</key><string>io.openai.limitwise</string>\n  <key>ProgramArguments</key><array><string>{}</string><string>daemon</string></array>\n  <key>EnvironmentVariables</key><dict><key>LIMITWISE_CODEX_PATH</key><string>{}</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Background</string>\n  <key>StandardOutPath</key><string>{}</string>\n  <key>StandardErrorPath</key><string>{}</string>\n</dict></plist>\n",
         xml_escape(&paths.installed_binary.to_string_lossy()),
+        xml_escape(&codex.to_string_lossy()),
         xml_escape(&stdout.to_string_lossy()),
         xml_escape(&stderr.to_string_lossy())
     )
@@ -152,6 +154,11 @@ fn remove_if_exists(path: &Path) -> Result<(), String> {
 
 fn systemd_escape(path: &Path) -> String {
     let value = path.to_string_lossy();
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn systemd_escape_environment(name: &str, path: &Path) -> String {
+    let value = format!("{name}={}", path.to_string_lossy());
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
@@ -206,10 +213,14 @@ mod tests {
 
     #[test]
     fn systemd_unit_has_security_and_restart_settings() {
-        let unit = systemd_unit(Path::new("/tmp/Limit Wise/limitwise"));
+        let unit = systemd_unit(
+            Path::new("/tmp/Limit Wise/limitwise"),
+            Path::new("/home/person/.local/bin/codex"),
+        );
         assert!(unit.contains("NoNewPrivileges=true"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("\"/tmp/Limit Wise/limitwise\" daemon"));
+        assert!(unit.contains("Environment=\"LIMITWISE_CODEX_PATH=/home/person/.local/bin/codex\""));
     }
 
     #[test]
@@ -220,6 +231,8 @@ mod tests {
             logs_dir: PathBuf::from("/tmp/a&b/logs"),
             installed_binary: PathBuf::from("/tmp/a&b/bin/limitwise"),
         };
-        assert!(launch_agent_plist(&paths).contains("a&amp;b"));
+        let plist = launch_agent_plist(&paths, Path::new("/Users/a&b/bin/codex"));
+        assert!(plist.contains("a&amp;b"));
+        assert!(plist.contains("LIMITWISE_CODEX_PATH"));
     }
 }

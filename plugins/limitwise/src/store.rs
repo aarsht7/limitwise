@@ -1,10 +1,10 @@
 use crate::config::{set_private_file, Paths};
-use crate::model::{route, validate_route, Difficulty};
+use crate::model::{route, validate_route, Difficulty, PermissionProfile};
 use crate::transcript::token_usage;
 use crate::usage::UsageSnapshot;
 use chrono::{DateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+pub const TASK_PAGE_SIZE: i64 = 20;
+pub const BATCH_PAGE_SIZE: i64 = 20;
+pub const BATCH_EDIT_LEASE_SECONDS: i64 = 60;
 
 #[cfg(test)]
 pub const TERMINAL_STATUSES: &[&str] = &[
@@ -28,6 +31,7 @@ pub const TERMINAL_STATUSES: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskDraft {
     pub title: String,
     pub prompt: String,
@@ -47,9 +51,47 @@ pub struct TaskDraft {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    #[serde(default)]
+    pub permission_profile: PermissionProfile,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchEditTaskInput {
+    #[serde(default)]
+    pub task_id: Option<String>,
+    pub title: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub success_criteria: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub run_at: Option<String>,
+    pub timezone: String,
+    pub difficulty: Difficulty,
+    pub model: String,
+    pub effort: String,
+    #[serde(default)]
+    pub permission_profile: PermissionProfile,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchEditInput {
+    pub edit_session_id: String,
+    #[serde(default)]
+    pub networked_confirmed: bool,
+    pub tasks: Vec<BatchEditTaskInput>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchEditSessionInput {
+    pub edit_session_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScheduleBatchInput {
     pub idempotency_key: String,
     #[serde(default)]
@@ -62,6 +104,8 @@ pub struct ScheduleBatchInput {
     pub cap_percent: Option<f64>,
     #[serde(default)]
     pub five_hour_cap_percent: Option<f64>,
+    #[serde(default)]
+    pub networked_confirmed: bool,
     pub tasks: Vec<TaskDraft>,
 }
 
@@ -70,6 +114,55 @@ pub struct ScheduleBatchInput {
 pub enum BudgetMode {
     Percentage,
     Tokens,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptKind {
+    Retry,
+    QuotaResume,
+}
+
+impl fmt::Display for AttemptKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Retry => "retry",
+            Self::QuotaResume => "quota_resume",
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryTaskOptions {
+    pub budget_mode: BudgetMode,
+    #[serde(default)]
+    pub weekly_cap_percent: Option<f64>,
+    #[serde(default)]
+    pub token_cap: Option<i64>,
+    #[serde(default)]
+    pub five_hour_cap_percent: Option<f64>,
+    #[serde(default)]
+    pub run_at: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub permission_profile: Option<PermissionProfile>,
+    #[serde(default)]
+    pub networked_confirmed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmedRetryTaskInput {
+    pub idempotency_key: String,
+    pub confirmed: bool,
+    #[serde(flatten)]
+    pub options: RetryTaskOptions,
 }
 
 impl fmt::Display for BudgetMode {
@@ -82,6 +175,7 @@ impl fmt::Display for BudgetMode {
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TaskUpdate {
     pub title: Option<String>,
     pub prompt: Option<String>,
@@ -92,6 +186,9 @@ pub struct TaskUpdate {
     pub difficulty: Option<Difficulty>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub permission_profile: Option<PermissionProfile>,
+    #[serde(default)]
+    pub networked_confirmed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -129,14 +226,101 @@ pub struct Task {
     pub position: i64,
     pub depends_on_task_id: Option<String>,
     pub dependency_type: String,
+    pub source_task_id: Option<String>,
+    pub attempt_kind: Option<String>,
+    pub attempt_number: i64,
     pub timezone: String,
     pub difficulty: String,
     pub model: String,
     pub effort: String,
+    pub permission_profile: PermissionProfile,
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TaskPage {
+    pub items: Vec<Task>,
+    pub page: i64,
+    pub page_size: i64,
+    pub total: i64,
+    pub total_pages: i64,
+    pub sort: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BatchGroup {
+    pub batch: Batch,
+    pub tasks: Vec<Task>,
+    pub editable: bool,
+    pub editing: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BatchPage {
+    pub items: Vec<BatchGroup>,
+    pub page: i64,
+    pub page_size: i64,
+    pub total: i64,
+    pub total_pages: i64,
+    pub sort: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BatchEditSession {
+    pub edit_session_id: String,
+    pub expires_at: i64,
+    pub batch: Batch,
+    pub tasks: Vec<Task>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ArchiveTaskResult {
+    pub task_id: String,
+    pub archived_at: i64,
+    pub status: String,
+    pub preserved_runs: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskSort {
+    Newest,
+    Oldest,
+    RunAtNewest,
+    RunAtOldest,
+    TitleAscending,
+    TitleDescending,
+}
+
+impl FromStr for TaskSort {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "newest" => Ok(Self::Newest),
+            "oldest" => Ok(Self::Oldest),
+            "run_at_newest" => Ok(Self::RunAtNewest),
+            "run_at_oldest" => Ok(Self::RunAtOldest),
+            "title_ascending" => Ok(Self::TitleAscending),
+            "title_descending" => Ok(Self::TitleDescending),
+            _ => Err("sort must be newest, oldest, run_at_newest, run_at_oldest, title_ascending, or title_descending".to_string()),
+        }
+    }
+}
+
+impl fmt::Display for TaskSort {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Newest => "newest",
+            Self::Oldest => "oldest",
+            Self::RunAtNewest => "run_at_newest",
+            Self::RunAtOldest => "run_at_oldest",
+            Self::TitleAscending => "title_ascending",
+            Self::TitleDescending => "title_descending",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -188,6 +372,50 @@ pub struct TaskStatus {
     pub task: Task,
     pub batch: Batch,
     pub runs: Vec<RunRecord>,
+    pub lineage: Vec<Task>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptBudgetPreview {
+    pub budget_mode: String,
+    pub weekly_cap_percent: Option<f64>,
+    pub token_cap: Option<i64>,
+    pub five_hour_cap_percent: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptTaskPreview {
+    pub title: String,
+    pub prompt: String,
+    pub success_criteria: String,
+    pub cwd: String,
+    pub timezone: String,
+    pub difficulty: String,
+    pub model: String,
+    pub effort: String,
+    pub permission_profile: PermissionProfile,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptPreview {
+    pub source_task_id: String,
+    pub attempt_kind: String,
+    pub action_label: String,
+    pub attempt_number: i64,
+    pub run_at: i64,
+    pub run_at_iso: String,
+    pub provider_reset_at: Option<i64>,
+    pub resume_mode: String,
+    pub session_available: bool,
+    pub task: AttemptTaskPreview,
+    pub budget: AttemptBudgetPreview,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptCreateResult {
+    pub batch: Batch,
+    pub task: Task,
+    pub idempotent_replay: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -221,6 +449,7 @@ pub struct IndividualRunUsage {
     pub budget_mode: String,
     pub model: String,
     pub effort: String,
+    pub permission_profile: PermissionProfile,
     pub tokens_used: Option<i64>,
     pub token_usage_state: String,
 }
@@ -257,6 +486,7 @@ struct StoredUsageRun {
     budget_mode: String,
     model: String,
     effort: String,
+    permission_profile: PermissionProfile,
     tokens_used: Option<i64>,
     token_usage_state: String,
 }
@@ -297,7 +527,9 @@ impl Store {
                    five_hour_window_reset_at INTEGER,
                    baseline_five_hour_used_percent REAL,
                    five_hour_allowance_points REAL NOT NULL DEFAULT 0,
-                   five_hour_consumed_points REAL NOT NULL DEFAULT 0
+                   five_hour_consumed_points REAL NOT NULL DEFAULT 0,
+                   edit_session_id TEXT,
+                   edit_heartbeat_at INTEGER
                  );
                  CREATE TABLE IF NOT EXISTS tasks (
                    id TEXT PRIMARY KEY,
@@ -317,7 +549,13 @@ impl Store {
                    last_error TEXT,
                    position INTEGER NOT NULL DEFAULT 0,
                    depends_on_task_id TEXT REFERENCES tasks(id),
-                   dependency_type TEXT NOT NULL DEFAULT 'success'
+                   dependency_type TEXT NOT NULL DEFAULT 'success',
+                   source_task_id TEXT REFERENCES tasks(id),
+                   attempt_kind TEXT,
+                   attempt_number INTEGER NOT NULL DEFAULT 1,
+                   archived_at INTEGER,
+                   permission_profile TEXT NOT NULL DEFAULT 'restricted'
+                     CHECK(permission_profile IN ('restricted','networked'))
                  );
                  CREATE TABLE IF NOT EXISTS runs (
                    id TEXT PRIMARY KEY,
@@ -332,6 +570,10 @@ impl Store {
                    tokens_used INTEGER,
                    token_usage_state TEXT NOT NULL DEFAULT 'pending',
                    error TEXT
+                 );
+                 CREATE TABLE IF NOT EXISTS task_stop_requests (
+                   task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+                   requested_at INTEGER NOT NULL
                  );",
             )
             .map_err(|e| e.to_string())?;
@@ -379,6 +621,8 @@ impl Store {
             "five_hour_consumed_points",
             "REAL NOT NULL DEFAULT 0",
         )?;
+        add_column_if_missing(&connection, "batches", "edit_session_id", "TEXT")?;
+        add_column_if_missing(&connection, "batches", "edit_heartbeat_at", "INTEGER")?;
         add_column_if_missing(
             &connection,
             "tasks",
@@ -397,6 +641,32 @@ impl Store {
             "dependency_type",
             "TEXT NOT NULL DEFAULT 'success'",
         )?;
+        add_column_if_missing(
+            &connection,
+            "tasks",
+            "source_task_id",
+            "TEXT REFERENCES tasks(id)",
+        )?;
+        add_column_if_missing(&connection, "tasks", "attempt_kind", "TEXT")?;
+        add_column_if_missing(
+            &connection,
+            "tasks",
+            "attempt_number",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        add_column_if_missing(&connection, "tasks", "archived_at", "INTEGER")?;
+        add_column_if_missing(
+            &connection,
+            "tasks",
+            "permission_profile",
+            "TEXT NOT NULL DEFAULT 'restricted' CHECK(permission_profile IN ('restricted','networked'))",
+        )?;
+        connection
+            .execute(
+                "UPDATE tasks SET attempt_number=1 WHERE attempt_number IS NULL OR attempt_number<1",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
         add_column_if_missing(&connection, "runs", "tokens_used", "INTEGER")?;
         add_column_if_missing(
             &connection,
@@ -409,6 +679,8 @@ impl Store {
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS tasks_due_idx ON tasks(status, run_at);
                  CREATE INDEX IF NOT EXISTS tasks_dependency_idx ON tasks(depends_on_task_id, status);
+                 CREATE INDEX IF NOT EXISTS tasks_source_idx ON tasks(source_task_id, attempt_number);
+                 CREATE INDEX IF NOT EXISTS tasks_created_idx ON tasks(created_at, id);
                  CREATE INDEX IF NOT EXISTS runs_started_idx ON runs(started_at);",
             )
             .map_err(|e| e.to_string())?;
@@ -425,6 +697,9 @@ impl Store {
         input: ScheduleBatchInput,
     ) -> Result<ScheduleBatchResult, String> {
         validate_batch_input(&input)?;
+        for task in &input.tasks {
+            require_networked_confirmation(task.permission_profile, input.networked_confirmed)?;
+        }
         if let Some(batch) = self.batch_by_idempotency(&input.idempotency_key)? {
             let tasks = self.tasks_for_batch(&batch.id)?;
             return Ok(ScheduleBatchResult {
@@ -469,13 +744,14 @@ impl Store {
             transaction
                 .execute(
                     "INSERT INTO tasks
-                     (id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,position,depends_on_task_id,dependency_type)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'scheduled',?12,?12,?13,?14,?15)",
+                     (id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,position,depends_on_task_id,dependency_type,permission_profile)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'scheduled',?12,?12,?13,?14,?15,?16)",
                     params![
                         task_ids[position], batch_id, draft.title.trim(), draft.prompt.trim(),
                         draft.success_criteria.trim(), draft.cwd, normalized.run_at,
                         normalized.timezone, draft.difficulty.to_string(), normalized.model,
-                        normalized.effort, now, position as i64, dependency, dependency_type
+                        normalized.effort, now, position as i64, dependency, dependency_type,
+                        draft.permission_profile.to_string()
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -492,10 +768,242 @@ impl Store {
         })
     }
 
+    /// Validate a complete schedule using the same rules as persistence without
+    /// creating a batch or task. HTTP uses this before showing confirmation.
+    pub fn validate_schedule_batch(&self, input: &ScheduleBatchInput) -> Result<(), String> {
+        validate_batch_input(input)?;
+        normalize_drafts(&input.tasks, |predecessor_id, cwd| {
+            self.continuation_reset_at(predecessor_id, cwd)
+        })?;
+        Ok(())
+    }
+
+    pub fn preview_retry_task(
+        &self,
+        source_task_id: &str,
+        options: &RetryTaskOptions,
+    ) -> Result<AttemptPreview, String> {
+        let source = self
+            .task(source_task_id)?
+            .ok_or_else(|| "task not found".to_string())?;
+        let quota_metadata = if matches!(
+            source.status.as_str(),
+            "quota_interrupted" | "quota_skipped"
+        ) {
+            self.quota_resume_metadata(source_task_id, &source.cwd).ok()
+        } else {
+            None
+        };
+        let attempt_kind = if quota_metadata.is_some() {
+            AttemptKind::QuotaResume
+        } else if matches!(
+            source.status.as_str(),
+            "quota_interrupted" | "quota_skipped"
+        ) {
+            AttemptKind::Retry
+        } else {
+            attempt_kind_for_status(&source.status)?
+        };
+        let budget = requested_retry_budget(options)?;
+        validate_five_hour_cap(options.five_hour_cap_percent)?;
+
+        let timezone = options
+            .timezone
+            .clone()
+            .unwrap_or_else(|| source.timezone.clone());
+        validate_timezone(&timezone)?;
+        let model = options
+            .model
+            .clone()
+            .unwrap_or_else(|| source.model.clone());
+        let effort = options
+            .effort
+            .clone()
+            .unwrap_or_else(|| source.effort.clone());
+        validate_route(&model, &effort)?;
+
+        let (run_at, provider_reset_at, session_available, resume_mode) = match attempt_kind {
+            AttemptKind::Retry => {
+                let value = options
+                    .run_at
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "run_at is required for retry".to_string())?;
+                let (run_at, explicit_offset) = parse_future_time(value)?;
+                validate_timezone_at(&timezone, run_at, explicit_offset)?;
+                (run_at, None, false, "fresh_session")
+            }
+            AttemptKind::QuotaResume => {
+                if options.run_at.is_some() {
+                    return Err(
+                        "run_at is derived from provider reset for quota_resume".to_string()
+                    );
+                }
+                let (reset_at, session_available) = quota_metadata
+                    .expect("quota resume is selected only with validated reset metadata");
+                (
+                    reset_at,
+                    Some(reset_at),
+                    session_available,
+                    if session_available {
+                        "session_resume_or_context_fallback"
+                    } else {
+                        "context_fallback"
+                    },
+                )
+            }
+        };
+
+        Ok(AttemptPreview {
+            source_task_id: source.id,
+            attempt_kind: attempt_kind.to_string(),
+            action_label: match attempt_kind {
+                AttemptKind::Retry => "Retry as new run",
+                AttemptKind::QuotaResume => "Continue after quota reset",
+            }
+            .to_string(),
+            attempt_number: source.attempt_number.max(1) + 1,
+            run_at,
+            run_at_iso: timestamp_in_timezone(run_at, &timezone),
+            provider_reset_at,
+            resume_mode: resume_mode.to_string(),
+            session_available,
+            task: AttemptTaskPreview {
+                title: source.title,
+                prompt: source.prompt,
+                success_criteria: source.success_criteria,
+                cwd: source.cwd,
+                timezone,
+                difficulty: source.difficulty,
+                model,
+                effort,
+                permission_profile: options
+                    .permission_profile
+                    .unwrap_or(source.permission_profile),
+            },
+            budget: AttemptBudgetPreview {
+                budget_mode: budget.mode.to_string(),
+                weekly_cap_percent: (budget.mode == BudgetMode::Percentage)
+                    .then_some(budget.cap_percent),
+                token_cap: budget.token_cap,
+                five_hour_cap_percent: options.five_hour_cap_percent,
+            },
+        })
+    }
+
+    pub fn create_retry_task(
+        &mut self,
+        source_task_id: &str,
+        input: ConfirmedRetryTaskInput,
+    ) -> Result<AttemptCreateResult, String> {
+        if !input.confirmed {
+            return Err("explicit confirmation is required".to_string());
+        }
+        if input.idempotency_key.trim().is_empty() {
+            return Err("idempotency_key is required".to_string());
+        }
+        if let Some(replay) = self.attempt_by_idempotency(&input.idempotency_key, source_task_id)? {
+            return Ok(replay);
+        }
+
+        let preview = self.preview_retry_task(source_task_id, &input.options)?;
+        require_networked_confirmation(
+            preview.task.permission_profile,
+            input.options.networked_confirmed,
+        )?;
+        let budget = requested_retry_budget(&input.options)?;
+        let batch_id = new_id("batch");
+        let task_id = new_id("task");
+        let now = now_epoch();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let existing_batch = transaction
+            .query_row(
+                "SELECT id FROM batches WHERE idempotency_key=?1",
+                params![input.idempotency_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if existing_batch.is_some() {
+            transaction.commit().map_err(|e| e.to_string())?;
+            return self
+                .attempt_by_idempotency(&input.idempotency_key, source_task_id)?
+                .ok_or_else(|| "idempotent attempt disappeared".to_string());
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO batches
+                 (id,idempotency_key,cap_percent,cap_basis,budget_mode,token_cap,created_at,five_hour_cap_percent)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    batch_id,
+                    input.idempotency_key,
+                    budget.cap_percent,
+                    budget.cap_basis,
+                    budget.mode.to_string(),
+                    budget.token_cap,
+                    now,
+                    input.options.five_hour_cap_percent,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        let quota_resume = preview.attempt_kind == AttemptKind::QuotaResume.to_string();
+        let dependency = quota_resume.then_some(source_task_id);
+        let dependency_type = if quota_resume {
+            "quota_reset"
+        } else {
+            "success"
+        };
+        transaction
+            .execute(
+                "INSERT INTO tasks
+                 (id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,position,depends_on_task_id,dependency_type,source_task_id,attempt_kind,attempt_number,permission_profile)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'scheduled',?12,?12,0,?13,?14,?15,?16,?17,?18)",
+                params![
+                    task_id,
+                    batch_id,
+                    preview.task.title,
+                    preview.task.prompt,
+                    preview.task.success_criteria,
+                    preview.task.cwd,
+                    preview.run_at,
+                    preview.task.timezone,
+                    preview.task.difficulty,
+                    preview.task.model,
+                    preview.task.effort,
+                    now,
+                    dependency,
+                    dependency_type,
+                    source_task_id,
+                    preview.attempt_kind,
+                    preview.attempt_number,
+                    preview.task.permission_profile.to_string(),
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        transaction.commit().map_err(|e| e.to_string())?;
+
+        let batch = self
+            .batch(&batch_id)?
+            .ok_or_else(|| "created attempt batch disappeared".to_string())?;
+        let task = self
+            .task(&task_id)?
+            .ok_or_else(|| "created attempt task disappeared".to_string())?;
+        Ok(AttemptCreateResult {
+            batch,
+            task,
+            idempotent_replay: false,
+        })
+    }
+
     pub fn list_tasks(&self, status: Option<&str>) -> Result<Vec<Task>, String> {
-        let mut sql = "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type FROM tasks".to_string();
+        let mut sql = "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type,source_task_id,attempt_kind,attempt_number,permission_profile FROM tasks WHERE archived_at IS NULL".to_string();
         if status.is_some() {
-            sql.push_str(" WHERE status=?1");
+            sql.push_str(" AND status=?1");
         }
         sql.push_str(" ORDER BY run_at ASC, position ASC");
         let mut statement = self.connection.prepare(&sql).map_err(|e| e.to_string())?;
@@ -512,10 +1020,456 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    pub fn list_task_page(
+        &self,
+        status: Option<&str>,
+        sort: TaskSort,
+        requested_page: i64,
+    ) -> Result<TaskPage, String> {
+        if requested_page < 1 {
+            return Err("page must be at least 1".to_string());
+        }
+        if let Some(status) = status {
+            if !is_known_task_status(status) {
+                return Err("status is not a known task status".to_string());
+            }
+        }
+        let total = match status {
+            Some(status) => self
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE archived_at IS NULL AND status=?1",
+                    params![status],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?,
+            None => self
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE archived_at IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?,
+        };
+        let total_pages = ((total + TASK_PAGE_SIZE - 1) / TASK_PAGE_SIZE).max(1);
+        let page = requested_page.min(total_pages);
+        let offset = (page - 1) * TASK_PAGE_SIZE;
+        let order = match sort {
+            TaskSort::Newest => "created_at DESC, id DESC",
+            TaskSort::Oldest => "created_at ASC, id ASC",
+            TaskSort::RunAtNewest => "run_at DESC, position DESC, id DESC",
+            TaskSort::RunAtOldest => "run_at ASC, position ASC, id ASC",
+            TaskSort::TitleAscending => "title COLLATE NOCASE ASC, created_at DESC, id DESC",
+            TaskSort::TitleDescending => "title COLLATE NOCASE DESC, created_at DESC, id DESC",
+        };
+        let columns = "id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type,source_task_id,attempt_kind,attempt_number,permission_profile";
+        let sql = if status.is_some() {
+            format!(
+                "SELECT {columns} FROM tasks WHERE archived_at IS NULL AND status=?1 ORDER BY {order} LIMIT ?2 OFFSET ?3"
+            )
+        } else {
+            format!("SELECT {columns} FROM tasks WHERE archived_at IS NULL ORDER BY {order} LIMIT ?1 OFFSET ?2")
+        };
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(|error| error.to_string())?;
+        let items = if let Some(status) = status {
+            statement
+                .query_map(params![status, TASK_PAGE_SIZE, offset], row_to_task)
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        } else {
+            statement
+                .query_map(params![TASK_PAGE_SIZE, offset], row_to_task)
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        };
+        Ok(TaskPage {
+            items,
+            page,
+            page_size: TASK_PAGE_SIZE,
+            total,
+            total_pages,
+            sort: sort.to_string(),
+        })
+    }
+
+    pub fn list_batch_page(
+        &self,
+        status: Option<&str>,
+        sort: TaskSort,
+        requested_page: i64,
+    ) -> Result<BatchPage, String> {
+        if requested_page < 1 {
+            return Err("page must be at least 1".to_string());
+        }
+        if let Some(status) = status {
+            if !is_known_task_status(status) {
+                return Err("status is not a known task status".to_string());
+            }
+        }
+        let mut grouped = BTreeMap::<String, Vec<Task>>::new();
+        for task in self.list_tasks(None)? {
+            grouped.entry(task.batch_id.clone()).or_default().push(task);
+        }
+        let now = now_epoch();
+        let mut items = Vec::with_capacity(grouped.len());
+        for (batch_id, mut tasks) in grouped {
+            tasks.sort_by_key(|task| task.position);
+            if status.is_some_and(|value| !tasks.iter().any(|task| task.status == value)) {
+                continue;
+            }
+            let batch = self
+                .batch(&batch_id)?
+                .ok_or_else(|| "task batch not found".to_string())?;
+            items.push(BatchGroup {
+                editable: batch_tasks_are_editable(&tasks),
+                editing: self.batch_edit_is_active(&batch_id, now)?,
+                batch,
+                tasks,
+            });
+        }
+        items.sort_by(|left, right| {
+            let left_task = &left.tasks[0];
+            let right_task = &right.tasks[0];
+            match sort {
+                TaskSort::Newest => right
+                    .batch
+                    .created_at
+                    .cmp(&left.batch.created_at)
+                    .then_with(|| right.batch.id.cmp(&left.batch.id)),
+                TaskSort::Oldest => left
+                    .batch
+                    .created_at
+                    .cmp(&right.batch.created_at)
+                    .then_with(|| left.batch.id.cmp(&right.batch.id)),
+                TaskSort::RunAtNewest => right_task
+                    .run_at
+                    .cmp(&left_task.run_at)
+                    .then_with(|| right.batch.id.cmp(&left.batch.id)),
+                TaskSort::RunAtOldest => left_task
+                    .run_at
+                    .cmp(&right_task.run_at)
+                    .then_with(|| left.batch.id.cmp(&right.batch.id)),
+                TaskSort::TitleAscending => left_task
+                    .title
+                    .to_lowercase()
+                    .cmp(&right_task.title.to_lowercase())
+                    .then_with(|| left.batch.id.cmp(&right.batch.id)),
+                TaskSort::TitleDescending => right_task
+                    .title
+                    .to_lowercase()
+                    .cmp(&left_task.title.to_lowercase())
+                    .then_with(|| right.batch.id.cmp(&left.batch.id)),
+            }
+        });
+        let total = items.len() as i64;
+        let total_pages = ((total + BATCH_PAGE_SIZE - 1) / BATCH_PAGE_SIZE).max(1);
+        let page = requested_page.min(total_pages);
+        let start = ((page - 1) * BATCH_PAGE_SIZE) as usize;
+        let items = items
+            .into_iter()
+            .skip(start)
+            .take(BATCH_PAGE_SIZE as usize)
+            .collect();
+        Ok(BatchPage {
+            items,
+            page,
+            page_size: BATCH_PAGE_SIZE,
+            total,
+            total_pages,
+            sort: sort.to_string(),
+        })
+    }
+
+    pub fn begin_batch_edit(&mut self, batch_id: &str) -> Result<BatchEditSession, String> {
+        let now = now_epoch();
+        let session_id = new_id("batch-edit");
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let tasks = query_tasks_for_batch(&transaction, batch_id, false)?;
+        if tasks.is_empty() {
+            return Err("batch not found".to_string());
+        }
+        if !batch_tasks_are_editable(&tasks) {
+            return Err("the batch can only be edited before its first task starts".to_string());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE batches
+                 SET edit_session_id=?2,edit_heartbeat_at=?3
+                 WHERE id=?1
+                   AND (edit_session_id IS NULL OR edit_heartbeat_at IS NULL OR edit_heartbeat_at<?4)",
+                params![batch_id, session_id, now, now - BATCH_EDIT_LEASE_SECONDS],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("the batch is already being edited".to_string());
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(BatchEditSession {
+            edit_session_id: session_id,
+            expires_at: now + BATCH_EDIT_LEASE_SECONDS,
+            batch: self
+                .batch(batch_id)?
+                .ok_or_else(|| "batch not found".to_string())?,
+            tasks,
+        })
+    }
+
+    pub fn heartbeat_batch_edit(
+        &self,
+        batch_id: &str,
+        edit_session_id: &str,
+    ) -> Result<i64, String> {
+        let now = now_epoch();
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE batches
+                 SET edit_heartbeat_at=?3
+                 WHERE id=?1 AND edit_session_id=?2 AND edit_heartbeat_at>=?4",
+                params![
+                    batch_id,
+                    edit_session_id,
+                    now,
+                    now - BATCH_EDIT_LEASE_SECONDS
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("the batch edit session expired; reopen the editor".to_string());
+        }
+        Ok(now + BATCH_EDIT_LEASE_SECONDS)
+    }
+
+    pub fn cancel_batch_edit(&self, batch_id: &str, edit_session_id: &str) -> Result<(), String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE batches
+                 SET edit_session_id=NULL,edit_heartbeat_at=NULL
+                 WHERE id=?1 AND edit_session_id=?2",
+                params![batch_id, edit_session_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed != 1 {
+            return Err("the batch edit session is not active".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn update_batch(
+        &mut self,
+        batch_id: &str,
+        input: BatchEditInput,
+    ) -> Result<BatchGroup, String> {
+        if input.edit_session_id.trim().is_empty() {
+            return Err("edit_session_id is required".to_string());
+        }
+        if input.tasks.is_empty() {
+            return Err("a batch must contain at least one task".to_string());
+        }
+        let mut seen_task_ids = HashSet::new();
+        let drafts = input
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(position, task)| {
+                if task.title.trim().is_empty() || task.prompt.trim().is_empty() {
+                    return Err("every task needs a title and prompt".to_string());
+                }
+                if task
+                    .task_id
+                    .as_ref()
+                    .is_some_and(|id| id.trim().is_empty() || !seen_task_ids.insert(id.clone()))
+                {
+                    return Err("task_id values must be non-empty and unique".to_string());
+                }
+                require_networked_confirmation(task.permission_profile, input.networked_confirmed)?;
+                Ok(TaskDraft {
+                    title: task.title.clone(),
+                    prompt: task.prompt.clone(),
+                    success_criteria: task.success_criteria.clone(),
+                    cwd: task.cwd.clone(),
+                    run_at: (position == 0).then(|| task.run_at.clone()).flatten(),
+                    after_previous: position != 0,
+                    continue_from_task_id: None,
+                    timezone: Some(task.timezone.clone()),
+                    difficulty: task.difficulty,
+                    model: Some(task.model.clone()),
+                    effort: Some(task.effort.clone()),
+                    permission_profile: task.permission_profile,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if drafts[0].run_at.is_none() {
+            return Err("the first task requires run_at".to_string());
+        }
+        let normalized = normalize_drafts(&drafts, |_, _| {
+            Err("batch editing does not create quota continuations".to_string())
+        })
+        .map_err(|error| {
+            if error == "run_at must be in the future" {
+                "the batch start time has passed; choose a future time before saving changes"
+                    .to_string()
+            } else {
+                error
+            }
+        })?;
+
+        let now = now_epoch();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let active_session: Option<String> = transaction
+            .query_row(
+                "SELECT edit_session_id FROM batches
+                 WHERE id=?1 AND edit_session_id=?2 AND edit_heartbeat_at>=?3",
+                params![
+                    batch_id,
+                    input.edit_session_id,
+                    now - BATCH_EDIT_LEASE_SECONDS
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if active_session.is_none() {
+            return Err("the batch edit session expired; reopen the editor".to_string());
+        }
+        let existing = query_tasks_for_batch(&transaction, batch_id, false)?;
+        if !batch_tasks_are_editable(&existing) {
+            return Err("the batch can only be edited before its first task starts".to_string());
+        }
+        let existing_by_id = existing
+            .iter()
+            .map(|task| (task.id.clone(), task))
+            .collect::<BTreeMap<_, _>>();
+        for task_id in &seen_task_ids {
+            if !existing_by_id.contains_key(task_id) {
+                return Err(format!(
+                    "task '{task_id}' does not belong to this editable batch"
+                ));
+            }
+        }
+
+        let task_ids = input
+            .tasks
+            .iter()
+            .map(|task| task.task_id.clone().unwrap_or_else(|| new_id("task")))
+            .collect::<Vec<_>>();
+        for (position, ((task, draft), normalized)) in input
+            .tasks
+            .iter()
+            .zip(drafts.iter())
+            .zip(normalized.iter())
+            .enumerate()
+        {
+            let dependency = (position != 0).then(|| task_ids[position - 1].as_str());
+            if task.task_id.is_some() {
+                transaction
+                    .execute(
+                        "UPDATE tasks
+                         SET title=?2,prompt=?3,success_criteria=?4,cwd=?5,run_at=?6,status='scheduled',
+                             timezone=?7,difficulty=?8,model=?9,effort=?10,
+                             permission_profile=?11,position=?12,depends_on_task_id=?13,
+                             dependency_type='success',updated_at=?14,last_error=NULL
+                         WHERE id=?1 AND batch_id=?15 AND status IN ('scheduled','cancelled')
+                           AND archived_at IS NULL",
+                        params![
+                            task_ids[position],
+                            draft.title.trim(),
+                            draft.prompt.trim(),
+                            draft.success_criteria.trim(),
+                            draft.cwd,
+                            normalized.run_at,
+                            normalized.timezone,
+                            draft.difficulty.to_string(),
+                            normalized.model,
+                            normalized.effort,
+                            draft.permission_profile.to_string(),
+                            position as i64,
+                            dependency,
+                            now,
+                            batch_id,
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+            } else {
+                transaction
+                    .execute(
+                        "INSERT INTO tasks
+                         (id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,
+                          difficulty,model,effort,status,created_at,updated_at,position,
+                          depends_on_task_id,dependency_type,permission_profile)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'scheduled',?12,?12,?13,?14,'success',?15)",
+                        params![
+                            task_ids[position],
+                            batch_id,
+                            draft.title.trim(),
+                            draft.prompt.trim(),
+                            draft.success_criteria.trim(),
+                            draft.cwd,
+                            normalized.run_at,
+                            normalized.timezone,
+                            draft.difficulty.to_string(),
+                            normalized.model,
+                            normalized.effort,
+                            now,
+                            position as i64,
+                            dependency,
+                            draft.permission_profile.to_string(),
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        for task in existing
+            .iter()
+            .filter(|task| !seen_task_ids.contains(&task.id))
+        {
+            transaction
+                .execute(
+                    "UPDATE tasks
+                     SET status='cancelled',archived_at=?2,updated_at=?2,
+                         last_error='Removed while editing batch'
+                     WHERE id=?1 AND status IN ('scheduled','cancelled') AND archived_at IS NULL",
+                    params![task.id, now],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .execute(
+                "UPDATE batches SET edit_session_id=NULL,edit_heartbeat_at=NULL
+                 WHERE id=?1 AND edit_session_id=?2",
+                params![batch_id, input.edit_session_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+
+        let tasks = query_tasks_for_batch(&self.connection, batch_id, false)?;
+        Ok(BatchGroup {
+            editable: batch_tasks_are_editable(&tasks),
+            editing: false,
+            batch: self
+                .batch(batch_id)?
+                .ok_or_else(|| "batch not found".to_string())?,
+            tasks,
+        })
+    }
+
     pub fn task(&self, task_id: &str) -> Result<Option<Task>, String> {
         self.connection
             .query_row(
-                "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type FROM tasks WHERE id=?1",
+                "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type,source_task_id,attempt_kind,attempt_number,permission_profile FROM tasks WHERE id=?1",
                 params![task_id], row_to_task,
             )
             .optional().map_err(|e| e.to_string())
@@ -552,7 +1506,44 @@ impl Store {
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        Ok(Some(TaskStatus { task, batch, runs }))
+        let lineage = self.task_lineage(task_id)?;
+        Ok(Some(TaskStatus {
+            task,
+            batch,
+            runs,
+            lineage,
+        }))
+    }
+
+    pub fn task_lineage(&self, task_id: &str) -> Result<Vec<Task>, String> {
+        let mut root = self
+            .task(task_id)?
+            .ok_or_else(|| "task not found".to_string())?;
+        let mut seen = HashSet::new();
+        while let Some(source_task_id) = root.source_task_id.clone() {
+            if !seen.insert(root.id.clone()) {
+                return Err("attempt lineage contains a cycle".to_string());
+            }
+            root = self
+                .task(&source_task_id)?
+                .ok_or_else(|| "attempt lineage source task not found".to_string())?;
+        }
+        let mut statement = self.connection.prepare(
+            "WITH RECURSIVE attempt_lineage AS (
+               SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type,source_task_id,attempt_kind,attempt_number,permission_profile
+               FROM tasks WHERE id=?1
+               UNION
+               SELECT child.id,child.batch_id,child.title,child.prompt,child.success_criteria,child.cwd,child.run_at,child.timezone,child.difficulty,child.model,child.effort,child.status,child.created_at,child.updated_at,child.last_error,child.position,child.depends_on_task_id,child.dependency_type,child.source_task_id,child.attempt_kind,child.attempt_number,child.permission_profile
+               FROM tasks child JOIN attempt_lineage parent ON child.source_task_id=parent.id
+             )
+             SELECT * FROM attempt_lineage ORDER BY attempt_number ASC, created_at ASC, id ASC",
+        ).map_err(|e| e.to_string())?;
+        let lineage = statement
+            .query_map(params![root.id], row_to_task)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(lineage)
     }
 
     pub fn task_usage_stats(&self, now: i64, timezone: &str) -> Result<TaskUsageStats, String> {
@@ -571,7 +1562,8 @@ impl Store {
             .connection
             .prepare(
                 "SELECT run.id,run.task_id,task.title,run.status,run.started_at,run.finished_at,
-                    batch.budget_mode,task.model,task.effort,run.tokens_used,run.token_usage_state
+                    batch.budget_mode,task.model,task.effort,run.tokens_used,run.token_usage_state,
+                    task.permission_profile
              FROM runs run
              JOIN tasks task ON task.id=run.task_id
              JOIN batches batch ON batch.id=task.batch_id
@@ -593,6 +1585,7 @@ impl Store {
                     effort: row.get(8)?,
                     tokens_used: row.get(9)?,
                     token_usage_state: row.get(10)?,
+                    permission_profile: permission_profile_from_row(row, 11)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -641,6 +1634,7 @@ impl Store {
                 budget_mode: run.budget_mode.clone(),
                 model: run.model.clone(),
                 effort: run.effort.clone(),
+                permission_profile: run.permission_profile,
                 tokens_used: run.tokens_used,
                 token_usage_state: run.token_usage_state.clone(),
             });
@@ -696,10 +1690,15 @@ impl Store {
             "SELECT task.id,task.batch_id,task.title,task.prompt,task.success_criteria,task.cwd,
                     task.run_at,task.timezone,task.difficulty,task.model,task.effort,task.status,
                     task.created_at,task.updated_at,task.last_error,task.position,task.depends_on_task_id,
-                    task.dependency_type
+                    task.dependency_type,task.source_task_id,task.attempt_kind,task.attempt_number,
+                    task.permission_profile
              FROM tasks task
+             JOIN batches batch ON batch.id=task.batch_id
              LEFT JOIN tasks prerequisite ON prerequisite.id=task.depends_on_task_id
-             WHERE task.status='scheduled' AND task.run_at<=?1
+             WHERE task.archived_at IS NULL
+               AND task.status='scheduled' AND task.run_at<=?1
+               AND (batch.edit_session_id IS NULL OR batch.edit_heartbeat_at IS NULL
+                    OR batch.edit_heartbeat_at<?2)
                AND (task.depends_on_task_id IS NULL
                     OR (task.dependency_type='success' AND prerequisite.status='completed')
                     OR (task.dependency_type='quota_reset'
@@ -707,7 +1706,7 @@ impl Store {
              ORDER BY task.run_at ASC, task.position ASC",
         ).map_err(|e| e.to_string())?;
         let tasks = statement
-            .query_map(params![now], row_to_task)
+            .query_map(params![now, now - BATCH_EDIT_LEASE_SECONDS], row_to_task)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -719,16 +1718,21 @@ impl Store {
             "SELECT task.id,task.batch_id,task.title,task.prompt,task.success_criteria,task.cwd,
                     task.run_at,task.timezone,task.difficulty,task.model,task.effort,task.status,
                     task.created_at,task.updated_at,task.last_error,task.position,task.depends_on_task_id,
-                    task.dependency_type
+                    task.dependency_type,task.source_task_id,task.attempt_kind,task.attempt_number,
+                    task.permission_profile
              FROM tasks task
+             JOIN batches batch ON batch.id=task.batch_id
              JOIN tasks prerequisite ON prerequisite.id=task.depends_on_task_id
-             WHERE task.status='scheduled'
+             WHERE task.archived_at IS NULL
+               AND task.status='scheduled'
+               AND (batch.edit_session_id IS NULL OR batch.edit_heartbeat_at IS NULL
+                    OR batch.edit_heartbeat_at<?1)
                AND task.dependency_type='success'
                AND prerequisite.status NOT IN ('scheduled','running','completed')
              ORDER BY task.run_at ASC, task.position ASC",
         ).map_err(|e| e.to_string())?;
         let tasks = statement
-            .query_map([], row_to_task)
+            .query_map(params![now_epoch() - BATCH_EDIT_LEASE_SECONDS], row_to_task)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -753,10 +1757,21 @@ impl Store {
     }
 
     pub fn claim_task(&self, task_id: &str) -> Result<bool, String> {
-        let changed = self.connection.execute(
-            "UPDATE tasks SET status='running',updated_at=?2 WHERE id=?1 AND status='scheduled'",
-            params![task_id, now_epoch()],
-        ).map_err(|e| e.to_string())?;
+        let now = now_epoch();
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE tasks SET status='running',updated_at=?2
+             WHERE id=?1 AND status='scheduled' AND archived_at IS NULL
+               AND EXISTS (
+                 SELECT 1 FROM batches batch
+                 WHERE batch.id=tasks.batch_id
+                   AND (batch.edit_session_id IS NULL OR batch.edit_heartbeat_at IS NULL
+                        OR batch.edit_heartbeat_at<?3)
+               )",
+                params![task_id, now, now - BATCH_EDIT_LEASE_SECONDS],
+            )
+            .map_err(|e| e.to_string())?;
         Ok(changed == 1)
     }
 
@@ -766,6 +1781,9 @@ impl Store {
             .ok_or_else(|| "task not found".to_string())?;
         if task.status != "scheduled" {
             return Err("only scheduled tasks can be updated".to_string());
+        }
+        if self.batch_edit_is_active(&task.batch_id, now_epoch())? {
+            return Err("the task belongs to a batch that is currently being edited".to_string());
         }
         let difficulty = update
             .difficulty
@@ -786,6 +1804,8 @@ impl Store {
             }
         });
         validate_route(&model, &effort)?;
+        let permission_profile = update.permission_profile.unwrap_or(task.permission_profile);
+        require_networked_confirmation(permission_profile, update.networked_confirmed)?;
         let timezone = update.timezone.unwrap_or(task.timezone.clone());
         validate_timezone(&timezone)?;
         let run_at = if let Some(value) = update.run_at {
@@ -805,12 +1825,15 @@ impl Store {
             return Err("a continuation task must stay in the predecessor worktree".to_string());
         }
         validate_cwd(&cwd)?;
-        self.connection.execute(
-            "UPDATE tasks SET title=?2,prompt=?3,success_criteria=?4,cwd=?5,run_at=?6,timezone=?7,difficulty=?8,model=?9,effort=?10,updated_at=?11 WHERE id=?1",
+        let changed = self.connection.execute(
+            "UPDATE tasks SET title=?2,prompt=?3,success_criteria=?4,cwd=?5,run_at=?6,timezone=?7,difficulty=?8,model=?9,effort=?10,permission_profile=?11,updated_at=?12 WHERE id=?1 AND status='scheduled'",
             params![task_id, update.title.unwrap_or(task.title), update.prompt.unwrap_or(task.prompt),
                 update.success_criteria.unwrap_or(task.success_criteria), cwd, run_at, timezone,
-                difficulty.to_string(), model, effort, now_epoch()],
+                difficulty.to_string(), model, effort, permission_profile.to_string(), now_epoch()],
         ).map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("only scheduled tasks can be updated".to_string());
+        }
         self.task(task_id)?
             .ok_or_else(|| "updated task disappeared".to_string())
     }
@@ -822,9 +1845,119 @@ impl Store {
         if task.status != "scheduled" {
             return Err("only scheduled tasks can be cancelled".to_string());
         }
+        if self.batch_edit_is_active(&task.batch_id, now_epoch())? {
+            return Err("the task belongs to a batch that is currently being edited".to_string());
+        }
         self.set_status(task_id, "cancelled", None)?;
         self.task(task_id)?
             .ok_or_else(|| "cancelled task disappeared".to_string())
+    }
+
+    pub fn request_task_stop(&self, task_id: &str) -> Result<Task, String> {
+        let task = self
+            .task(task_id)?
+            .ok_or_else(|| "task not found".to_string())?;
+        if task.status != "running" {
+            return Err("only a running task can be stopped".to_string());
+        }
+        let inserted = self
+            .connection
+            .execute(
+                "INSERT OR IGNORE INTO task_stop_requests (task_id,requested_at)
+                 SELECT id,?2 FROM tasks WHERE id=?1 AND status='running'",
+                params![task_id, now_epoch()],
+            )
+            .map_err(|error| error.to_string())?;
+        if inserted == 0 && !self.task_stop_requested(task_id)? {
+            return Err("task is no longer running".to_string());
+        }
+        self.task(task_id)?
+            .ok_or_else(|| "running task disappeared".to_string())
+    }
+
+    pub fn archive_task(&self, task_id: &str) -> Result<ArchiveTaskResult, String> {
+        let state = self
+            .connection
+            .query_row(
+                "SELECT status,archived_at,batch_id FROM tasks WHERE id=?1",
+                params![task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        if state.0 == "running" {
+            return Err("a running task must be stopped before it can be removed".to_string());
+        }
+        if state.1.is_none() && self.batch_edit_is_active(&state.2, now_epoch())? {
+            return Err("the task belongs to a batch that is currently being edited".to_string());
+        }
+        let archived_at = state.1.unwrap_or_else(now_epoch);
+        if state.1.is_none() {
+            let changed = self
+                .connection
+                .execute(
+                    "UPDATE tasks
+                     SET status=CASE WHEN status='scheduled' THEN 'cancelled' ELSE status END,
+                         archived_at=?2,updated_at=?2
+                     WHERE id=?1 AND archived_at IS NULL AND status!='running'",
+                    params![task_id, archived_at],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err(
+                    "task changed while it was being removed; refresh and retry".to_string()
+                );
+            }
+        }
+        let status = self
+            .connection
+            .query_row(
+                "SELECT status FROM tasks WHERE id=?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let preserved_runs = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE task_id=?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(ArchiveTaskResult {
+            task_id: task_id.to_string(),
+            archived_at,
+            status,
+            preserved_runs,
+        })
+    }
+
+    pub fn task_stop_requested(&self, task_id: &str) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_stop_requests WHERE task_id=?1)",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn clear_task_stop_request(&self, task_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM task_stop_requests WHERE task_id=?1",
+                params![task_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn set_status(
@@ -896,7 +2029,67 @@ impl Store {
             .ok_or_else(|| "continuation predecessor has no quota snapshot".to_string())?;
         let snapshot: UsageSnapshot = serde_json::from_str(&usage_json)
             .map_err(|_| "continuation predecessor has no valid quota snapshot".to_string())?;
-        Ok(snapshot.five_hour.resets_at.max(now_epoch()))
+        Ok(snapshot
+            .five_hour
+            .ok_or_else(|| "continuation predecessor has no 5-hour quota snapshot".to_string())?
+            .resets_at
+            .max(now_epoch()))
+    }
+
+    fn quota_resume_metadata(
+        &self,
+        predecessor_id: &str,
+        cwd: &str,
+    ) -> Result<(i64, bool), String> {
+        let predecessor = self
+            .task(predecessor_id)?
+            .ok_or_else(|| "task not found".to_string())?;
+        if !matches!(
+            predecessor.status.as_str(),
+            "quota_interrupted" | "quota_skipped"
+        ) {
+            return Err(format!(
+                "quota_resume source must be quota_interrupted or quota_skipped, not {}",
+                predecessor.status
+            ));
+        }
+        if predecessor.cwd != cwd {
+            return Err("quota_resume task must use the source worktree".to_string());
+        }
+        self.validate_existing_dependency_chain(predecessor_id)?;
+        let (usage_json, session_id) = self
+            .connection
+            .query_row(
+                "SELECT COALESCE(usage_after_json,usage_before_json),session_id FROM runs
+                 WHERE task_id=?1 ORDER BY started_at DESC LIMIT 1",
+                params![predecessor_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "quota_resume source has no run metadata".to_string())?;
+        let usage_json =
+            usage_json.ok_or_else(|| "quota_resume source has no quota snapshot".to_string())?;
+        let snapshot: UsageSnapshot = serde_json::from_str(&usage_json)
+            .map_err(|_| "quota_resume source has no valid quota snapshot".to_string())?;
+        let five_hour = snapshot
+            .five_hour
+            .ok_or_else(|| "quota_resume source has no 5-hour quota snapshot".to_string())?;
+        if five_hour.resets_at <= 0 {
+            return Err("quota_resume source has stale quota reset metadata".to_string());
+        }
+        Ok((
+            five_hour.resets_at,
+            session_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty()),
+        ))
     }
 
     fn validate_existing_dependency_chain(&self, task_id: &str) -> Result<(), String> {
@@ -1129,17 +2322,82 @@ impl Store {
         ).optional().map_err(|e| e.to_string())
     }
 
-    fn tasks_for_batch(&self, batch_id: &str) -> Result<Vec<Task>, String> {
-        let mut statement = self.connection.prepare(
-            "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type FROM tasks WHERE batch_id=?1 ORDER BY run_at ASC, position ASC",
-        ).map_err(|e| e.to_string())?;
-        let tasks = statement
-            .query_map(params![batch_id], row_to_task)
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        Ok(tasks)
+    fn attempt_by_idempotency(
+        &self,
+        key: &str,
+        source_task_id: &str,
+    ) -> Result<Option<AttemptCreateResult>, String> {
+        let Some(batch) = self.batch_by_idempotency(key)? else {
+            return Ok(None);
+        };
+        let tasks = self.tasks_for_batch(&batch.id)?;
+        if tasks.len() != 1
+            || tasks[0].source_task_id.as_deref() != Some(source_task_id)
+            || tasks[0].attempt_kind.is_none()
+        {
+            return Err("idempotency_key is already used by another operation".to_string());
+        }
+        Ok(Some(AttemptCreateResult {
+            batch,
+            task: tasks.into_iter().next().expect("length checked"),
+            idempotent_replay: true,
+        }))
     }
+
+    fn tasks_for_batch(&self, batch_id: &str) -> Result<Vec<Task>, String> {
+        query_tasks_for_batch(&self.connection, batch_id, true)
+    }
+
+    fn batch_edit_is_active(&self, batch_id: &str, now: i64) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM batches
+                   WHERE id=?1 AND edit_session_id IS NOT NULL
+                     AND edit_heartbeat_at>=?2
+                 )",
+                params![batch_id, now - BATCH_EDIT_LEASE_SECONDS],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn query_tasks_for_batch(
+    connection: &Connection,
+    batch_id: &str,
+    include_archived: bool,
+) -> Result<Vec<Task>, String> {
+    let archived = if include_archived {
+        ""
+    } else {
+        " AND archived_at IS NULL"
+    };
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error,position,depends_on_task_id,dependency_type,source_task_id,attempt_kind,attempt_number,permission_profile FROM tasks WHERE batch_id=?1{archived} ORDER BY position ASC, id ASC"
+        ))
+        .map_err(|error| error.to_string())?;
+    let tasks = statement
+        .query_map(params![batch_id], row_to_task)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(tasks)
+}
+
+fn batch_tasks_are_editable(tasks: &[Task]) -> bool {
+    tasks.first().is_some_and(|task| {
+        task.status == "scheduled"
+            && task.depends_on_task_id.is_none()
+            && task.source_task_id.is_none()
+            && task.attempt_kind.is_none()
+    }) && tasks.iter().all(|task| {
+        matches!(task.status.as_str(), "scheduled" | "cancelled")
+            && task.dependency_type == "success"
+            && task.source_task_id.is_none()
+            && task.attempt_kind.is_none()
+    })
 }
 
 fn validate_batch_input(input: &ScheduleBatchInput) -> Result<(), String> {
@@ -1147,11 +2405,7 @@ fn validate_batch_input(input: &ScheduleBatchInput) -> Result<(), String> {
         return Err("idempotency_key is required".to_string());
     }
     requested_budget(input)?;
-    if let Some(cap) = input.five_hour_cap_percent {
-        if !cap.is_finite() || cap <= 0.0 || cap > 100.0 {
-            return Err("five_hour_cap_percent must be greater than 0 and at most 100".to_string());
-        }
-    }
+    validate_five_hour_cap(input.five_hour_cap_percent)?;
     if input.tasks.is_empty() {
         return Err("at least one task is required".to_string());
     }
@@ -1161,6 +2415,67 @@ fn validate_batch_input(input: &ScheduleBatchInput) -> Result<(), String> {
         }
     }
     validate_draft_triggers(&input.tasks)?;
+    Ok(())
+}
+
+fn require_networked_confirmation(
+    permission_profile: PermissionProfile,
+    networked_confirmed: bool,
+) -> Result<(), String> {
+    if permission_profile == PermissionProfile::Networked && !networked_confirmed {
+        return Err(
+            "networked permission_profile requires separate explicit networked_confirmed=true acknowledgement"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn attempt_kind_for_status(status: &str) -> Result<AttemptKind, String> {
+    match status {
+        "quota_interrupted" | "quota_skipped" => Ok(AttemptKind::QuotaResume),
+        "failed" | "blocked" | "missed" | "cancelled" => Ok(AttemptKind::Retry),
+        "completed" | "scheduled" | "running" => Err(format!(
+            "task status '{status}' is not eligible for retry or resume"
+        )),
+        _ => Err(format!("unknown task status '{status}'")),
+    }
+}
+
+fn is_known_task_status(status: &str) -> bool {
+    matches!(
+        status,
+        "scheduled"
+            | "running"
+            | "completed"
+            | "failed"
+            | "blocked"
+            | "missed"
+            | "cancelled"
+            | "quota_skipped"
+            | "quota_interrupted"
+    )
+}
+
+fn requested_retry_budget(options: &RetryTaskOptions) -> Result<RequestedBudget, String> {
+    requested_budget(&ScheduleBatchInput {
+        idempotency_key: "retry-preview".to_string(),
+        budget_mode: Some(options.budget_mode),
+        weekly_cap_percent: options.weekly_cap_percent,
+        token_cap: options.token_cap,
+        cap_percent: None,
+        five_hour_cap_percent: options.five_hour_cap_percent,
+        networked_confirmed: false,
+        tasks: Vec::new(),
+    })
+}
+
+fn validate_five_hour_cap(cap: Option<f64>) -> Result<(), String> {
+    if let Some(cap) = cap {
+        if !cap.is_finite() || cap <= 0.0 || cap > 100.0 {
+            return Err("five_hour_cap_percent must be greater than 0 and at most 100".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -1388,14 +2703,7 @@ fn row_to_batch(row: &Row<'_>) -> rusqlite::Result<Batch> {
 fn row_to_task(row: &Row<'_>) -> rusqlite::Result<Task> {
     let timestamp: i64 = row.get(6)?;
     let timezone: String = row.get(7)?;
-    let run_at_iso = DateTime::<Utc>::from_timestamp(timestamp, 0)
-        .and_then(|utc| {
-            timezone
-                .parse::<Tz>()
-                .ok()
-                .map(|tz| utc.with_timezone(&tz).to_rfc3339())
-        })
-        .unwrap_or_else(|| timestamp.to_string());
+    let run_at_iso = timestamp_in_timezone(timestamp, &timezone);
     Ok(Task {
         id: row.get(0)?,
         batch_id: row.get(1)?,
@@ -1408,15 +2716,41 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         position: row.get(15)?,
         depends_on_task_id: row.get(16)?,
         dependency_type: row.get(17)?,
+        source_task_id: row.get(18)?,
+        attempt_kind: row.get(19)?,
+        attempt_number: row.get(20)?,
         timezone,
         difficulty: row.get(8)?,
         model: row.get(9)?,
         effort: row.get(10)?,
+        permission_profile: permission_profile_from_row(row, 21)?,
         status: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
         last_error: row.get(14)?,
     })
+}
+
+fn permission_profile_from_row(row: &Row<'_>, index: usize) -> rusqlite::Result<PermissionProfile> {
+    let value: String = row.get(index)?;
+    PermissionProfile::from_str(&value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        )
+    })
+}
+
+fn timestamp_in_timezone(timestamp: i64, timezone: &str) -> String {
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
+        .and_then(|utc| {
+            timezone
+                .parse::<Tz>()
+                .ok()
+                .map(|tz| utc.with_timezone(&tz).to_rfc3339())
+        })
+        .unwrap_or_else(|| timestamp.to_string())
 }
 
 fn add_column_if_missing(
@@ -1568,6 +2902,7 @@ mod tests {
             token_cap: None,
             cap_percent: None,
             five_hour_cap_percent: None,
+            networked_confirmed: false,
             tasks: vec![],
         };
         assert!(validate_batch_input(&input).is_err());
@@ -1580,6 +2915,137 @@ mod tests {
     fn terminal_statuses_are_stable() {
         assert!(TERMINAL_STATUSES.contains(&"quota_interrupted"));
         assert!(!TERMINAL_STATUSES.contains(&"running"));
+    }
+
+    #[test]
+    fn schedule_validation_reuses_rules_without_persisting() {
+        let store = Store::in_memory().unwrap();
+        let input = sample_input("validation-only", 1.0);
+        store.validate_schedule_batch(&input).unwrap();
+        assert!(store
+            .batch_by_idempotency("validation-only")
+            .unwrap()
+            .is_none());
+        assert!(store.list_tasks(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn old_client_payload_defaults_every_task_to_restricted() {
+        let run_at = (Utc::now() + Duration::hours(2)).to_rfc3339();
+        let input: ScheduleBatchInput = serde_json::from_value(serde_json::json!({
+            "idempotency_key": "old-client-profile-default",
+            "budget_mode": "percentage",
+            "weekly_cap_percent": 1,
+            "tasks": [{
+                "title": "legacy client",
+                "prompt": "safe work",
+                "cwd": "/tmp",
+                "run_at": run_at,
+                "timezone": "UTC",
+                "difficulty": "simple"
+            }]
+        }))
+        .unwrap();
+        let mut store = Store::in_memory().unwrap();
+        let created = store.schedule_batch(input).unwrap();
+        assert_eq!(
+            created.tasks[0].permission_profile,
+            PermissionProfile::Restricted
+        );
+    }
+
+    #[test]
+    fn networked_writes_require_separate_confirmation_and_remain_race_safe() {
+        let mut store = Store::in_memory().unwrap();
+        let mut input = sample_input("networked-confirmation", 1.0);
+        input.tasks[0].permission_profile = PermissionProfile::Networked;
+        assert!(store
+            .schedule_batch(input.clone())
+            .unwrap_err()
+            .contains("networked_confirmed=true"));
+        assert!(store.list_tasks(None).unwrap().is_empty());
+        input.networked_confirmed = true;
+        let task = store.schedule_batch(input).unwrap().tasks.remove(0);
+        assert_eq!(task.permission_profile, PermissionProfile::Networked);
+
+        let error = store
+            .update_task(
+                &task.id,
+                TaskUpdate {
+                    permission_profile: Some(PermissionProfile::Networked),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap_err();
+        assert!(error.contains("networked_confirmed=true"));
+        store
+            .update_task(
+                &task.id,
+                TaskUpdate {
+                    permission_profile: Some(PermissionProfile::Restricted),
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap();
+        assert!(store.claim_task(&task.id).unwrap());
+        assert!(store
+            .update_task(
+                &task.id,
+                TaskUpdate {
+                    permission_profile: Some(PermissionProfile::Networked),
+                    networked_confirmed: true,
+                    ..TaskUpdate::default()
+                },
+            )
+            .unwrap_err()
+            .contains("only scheduled tasks"));
+    }
+
+    #[test]
+    fn retry_inherits_profile_and_confirmed_change_is_explicit() {
+        let mut store = Store::in_memory().unwrap();
+        let mut input = sample_input("networked-retry-source", 1.0);
+        input.tasks[0].permission_profile = PermissionProfile::Networked;
+        input.networked_confirmed = true;
+        let source = store.schedule_batch(input).unwrap().tasks.remove(0);
+        store
+            .set_status(&source.id, "failed", Some("fixture"))
+            .unwrap();
+
+        let inherited = retry_options(true);
+        let preview = store.preview_retry_task(&source.id, &inherited).unwrap();
+        assert_eq!(
+            preview.task.permission_profile,
+            PermissionProfile::Networked
+        );
+        let error = store
+            .create_retry_task(
+                &source.id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "networked-retry-unconfirmed".into(),
+                    confirmed: true,
+                    options: inherited.clone(),
+                },
+            )
+            .unwrap_err();
+        assert!(error.contains("networked_confirmed=true"));
+
+        let mut restricted = inherited;
+        restricted.permission_profile = Some(PermissionProfile::Restricted);
+        let created = store
+            .create_retry_task(
+                &source.id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "networked-retry-changed".into(),
+                    confirmed: true,
+                    options: restricted,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            created.task.permission_profile,
+            PermissionProfile::Restricted
+        );
     }
 
     #[test]
@@ -1599,6 +3065,281 @@ mod tests {
         assert_eq!(created.tasks[0].run_at_iso, "2030-07-01T12:00:00+02:00");
     }
 
+    #[test]
+    fn task_pages_are_twenty_rows_and_default_to_newest_first() {
+        let mut input = sample_input("paged-tasks", 5.0);
+        let first = input.tasks.remove(0);
+        input.tasks = (0..25)
+            .map(|index| TaskDraft {
+                title: format!("Task {index:02}"),
+                prompt: first.prompt.clone(),
+                success_criteria: first.success_criteria.clone(),
+                cwd: first.cwd.clone(),
+                run_at: (index == 0).then(|| first.run_at.clone().unwrap()),
+                after_previous: index != 0,
+                continue_from_task_id: None,
+                timezone: first.timezone.clone(),
+                difficulty: first.difficulty,
+                model: None,
+                effort: None,
+                permission_profile: PermissionProfile::Restricted,
+            })
+            .collect();
+        let mut store = Store::in_memory().unwrap();
+        let created = store.schedule_batch(input).unwrap();
+        for (index, task) in created.tasks.iter().enumerate() {
+            store
+                .connection
+                .execute(
+                    "UPDATE tasks SET created_at=?2 WHERE id=?1",
+                    params![task.id, 1_000 + index as i64],
+                )
+                .unwrap();
+        }
+
+        let first_page = store.list_task_page(None, TaskSort::Newest, 1).unwrap();
+        assert_eq!(first_page.items.len(), 20);
+        assert_eq!(first_page.total, 25);
+        assert_eq!(first_page.total_pages, 2);
+        assert_eq!(first_page.items[0].title, "Task 24");
+        let second_page = store.list_task_page(None, TaskSort::Newest, 2).unwrap();
+        assert_eq!(second_page.items.len(), 5);
+        assert_eq!(second_page.items[0].title, "Task 04");
+        let alphabetical = store
+            .list_task_page(None, TaskSort::TitleAscending, 1)
+            .unwrap();
+        assert_eq!(alphabetical.items[0].title, "Task 00");
+        assert!(store.list_task_page(None, TaskSort::Newest, 0).is_err());
+    }
+
+    #[test]
+    fn dashboard_pages_group_chained_tasks_by_batch() {
+        let mut input = sample_input("grouped-dashboard", 5.0);
+        let first = input.tasks[0].clone();
+        input.tasks.push(TaskDraft {
+            title: "second".into(),
+            prompt: "continue the work".into(),
+            success_criteria: "chain complete".into(),
+            cwd: first.cwd,
+            run_at: None,
+            after_previous: true,
+            continue_from_task_id: None,
+            timezone: first.timezone,
+            difficulty: Difficulty::Simple,
+            model: None,
+            effort: None,
+            permission_profile: PermissionProfile::Restricted,
+        });
+        let mut store = Store::in_memory().unwrap();
+        let created = store.schedule_batch(input).unwrap();
+
+        let page = store.list_batch_page(None, TaskSort::Newest, 1).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].batch.id, created.batch.id);
+        assert_eq!(page.items[0].tasks.len(), 2);
+        assert!(page.items[0].editable);
+    }
+
+    #[test]
+    fn active_batch_edit_blocks_claim_and_atomically_replaces_the_chain() {
+        let mut input = sample_input("edit-batch", 5.0);
+        let first_draft = input.tasks[0].clone();
+        input.tasks.push(TaskDraft {
+            title: "removed task".into(),
+            prompt: "remove me".into(),
+            success_criteria: "not retained".into(),
+            cwd: first_draft.cwd,
+            run_at: None,
+            after_previous: true,
+            continue_from_task_id: None,
+            timezone: first_draft.timezone,
+            difficulty: Difficulty::Simple,
+            model: None,
+            effort: None,
+            permission_profile: PermissionProfile::Restricted,
+        });
+        let mut store = Store::in_memory().unwrap();
+        let created = store.schedule_batch(input).unwrap();
+        let session = store.begin_batch_edit(&created.batch.id).unwrap();
+        assert!(!store.claim_task(&created.tasks[0].id).unwrap());
+
+        let first = BatchEditTaskInput {
+            task_id: Some(created.tasks[0].id.clone()),
+            title: "edited first".into(),
+            prompt: created.tasks[0].prompt.clone(),
+            success_criteria: created.tasks[0].success_criteria.clone(),
+            cwd: created.tasks[0].cwd.clone(),
+            run_at: Some((Utc::now() + Duration::hours(4)).to_rfc3339()),
+            timezone: "UTC".into(),
+            difficulty: Difficulty::Standard,
+            model: "gpt-6-sol".into(),
+            effort: "medium".into(),
+            permission_profile: PermissionProfile::Restricted,
+        };
+        let added = BatchEditTaskInput {
+            task_id: None,
+            title: "new second".into(),
+            prompt: "finish the edited chain".into(),
+            success_criteria: "done".into(),
+            cwd: "/tmp".into(),
+            run_at: None,
+            timezone: "UTC".into(),
+            difficulty: Difficulty::Simple,
+            model: "gpt-5.6-luna".into(),
+            effort: "low".into(),
+            permission_profile: PermissionProfile::Restricted,
+        };
+        let updated = store
+            .update_batch(
+                &created.batch.id,
+                BatchEditInput {
+                    edit_session_id: session.edit_session_id,
+                    networked_confirmed: false,
+                    tasks: vec![first, added],
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.tasks.len(), 2);
+        assert_eq!(updated.tasks[0].id, created.tasks[0].id);
+        assert_eq!(updated.tasks[0].title, "edited first");
+        assert_eq!(updated.tasks[1].title, "new second");
+        assert_eq!(
+            updated.tasks[1].depends_on_task_id.as_deref(),
+            Some(updated.tasks[0].id.as_str())
+        );
+        let removed = store.task(&created.tasks[1].id).unwrap().unwrap();
+        assert_eq!(removed.status, "cancelled");
+        assert!(store.claim_task(&updated.tasks[0].id).unwrap());
+    }
+
+    #[test]
+    fn passed_start_time_must_change_before_batch_edit_can_save() {
+        let mut store = Store::in_memory().unwrap();
+        let created = store
+            .schedule_batch(sample_input("edit-passed-time", 1.0))
+            .unwrap();
+        let session = store.begin_batch_edit(&created.batch.id).unwrap();
+        let task = &created.tasks[0];
+        let error = store
+            .update_batch(
+                &created.batch.id,
+                BatchEditInput {
+                    edit_session_id: session.edit_session_id.clone(),
+                    networked_confirmed: false,
+                    tasks: vec![BatchEditTaskInput {
+                        task_id: Some(task.id.clone()),
+                        title: task.title.clone(),
+                        prompt: task.prompt.clone(),
+                        success_criteria: task.success_criteria.clone(),
+                        cwd: task.cwd.clone(),
+                        run_at: Some((Utc::now() - Duration::minutes(1)).to_rfc3339()),
+                        timezone: "UTC".into(),
+                        difficulty: Difficulty::Standard,
+                        model: "gpt-6-sol".into(),
+                        effort: "medium".into(),
+                        permission_profile: PermissionProfile::Restricted,
+                    }],
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "the batch start time has passed; choose a future time before saving changes"
+        );
+        assert!(!store.claim_task(&task.id).unwrap());
+        store
+            .cancel_batch_edit(&created.batch.id, &session.edit_session_id)
+            .unwrap();
+        assert!(store.claim_task(&task.id).unwrap());
+    }
+
+    #[test]
+    fn archive_hides_task_but_preserves_run_usage_metadata() {
+        let mut store = Store::in_memory().unwrap();
+        let task = store
+            .schedule_batch(sample_input("archive-completed", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        let now = now_epoch();
+        store
+            .connection
+            .execute(
+                "INSERT INTO runs
+                 (id,task_id,started_at,finished_at,status,tokens_used,token_usage_state)
+                 VALUES ('run-archive',?1,?2,?2,'completed',321,'reported')",
+                params![task.id, now],
+            )
+            .unwrap();
+        store.set_status(&task.id, "completed", None).unwrap();
+
+        let archived = store.archive_task(&task.id).unwrap();
+        assert_eq!(archived.status, "completed");
+        assert_eq!(archived.preserved_runs, 1);
+        assert!(store.list_tasks(None).unwrap().is_empty());
+        assert_eq!(
+            store
+                .list_task_page(None, TaskSort::Newest, 1)
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(store.task_status(&task.id).unwrap().unwrap().runs.len(), 1);
+        assert_eq!(
+            store
+                .task_usage_stats(now, "UTC")
+                .unwrap()
+                .last_week
+                .tokens_used,
+            321
+        );
+
+        let replay = store.archive_task(&task.id).unwrap();
+        assert_eq!(replay.archived_at, archived.archived_at);
+        assert_eq!(replay.preserved_runs, 1);
+    }
+
+    #[test]
+    fn archive_cancels_pending_task_and_rejects_running_task() {
+        let mut store = Store::in_memory().unwrap();
+        let pending = store
+            .schedule_batch(sample_input("archive-pending", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        assert_eq!(store.archive_task(&pending.id).unwrap().status, "cancelled");
+        assert!(!store.claim_task(&pending.id).unwrap());
+
+        let running = store
+            .schedule_batch(sample_input("archive-running", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        assert!(store.claim_task(&running.id).unwrap());
+        assert!(store
+            .archive_task(&running.id)
+            .unwrap_err()
+            .contains("must be stopped"));
+    }
+
+    #[test]
+    fn running_task_stop_request_is_idempotent_and_clearable() {
+        let mut store = Store::in_memory().unwrap();
+        let task = store
+            .schedule_batch(sample_input("stop-running", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        assert!(store.request_task_stop(&task.id).is_err());
+        assert!(store.claim_task(&task.id).unwrap());
+        assert_eq!(store.request_task_stop(&task.id).unwrap().status, "running");
+        assert_eq!(store.request_task_stop(&task.id).unwrap().status, "running");
+        assert!(store.task_stop_requested(&task.id).unwrap());
+        store.clear_task_stop_request(&task.id).unwrap();
+        assert!(!store.task_stop_requested(&task.id).unwrap());
+    }
+
     fn sample_input(key: &str, cap_percent: f64) -> ScheduleBatchInput {
         let run_at = (Utc::now() + Duration::hours(2)).to_rfc3339();
         ScheduleBatchInput {
@@ -1608,6 +3349,7 @@ mod tests {
             token_cap: None,
             cap_percent: None,
             five_hour_cap_percent: None,
+            networked_confirmed: false,
             tasks: vec![TaskDraft {
                 title: "test".into(),
                 prompt: "make a harmless change".into(),
@@ -1620,8 +3362,398 @@ mod tests {
                 difficulty: Difficulty::Standard,
                 model: None,
                 effort: None,
+                permission_profile: PermissionProfile::Restricted,
             }],
         }
+    }
+
+    fn retry_options(with_run_at: bool) -> RetryTaskOptions {
+        RetryTaskOptions {
+            budget_mode: BudgetMode::Percentage,
+            weekly_cap_percent: Some(2.0),
+            token_cap: None,
+            five_hour_cap_percent: Some(4.0),
+            run_at: with_run_at.then(|| (Utc::now() + Duration::hours(3)).to_rfc3339()),
+            timezone: Some("UTC".into()),
+            model: Some("gpt-5.6-luna".into()),
+            effort: Some("low".into()),
+            permission_profile: None,
+            networked_confirmed: false,
+        }
+    }
+
+    #[test]
+    fn retry_eligibility_covers_every_source_status() {
+        for status in ["quota_interrupted", "quota_skipped"] {
+            assert_eq!(
+                attempt_kind_for_status(status).unwrap(),
+                AttemptKind::QuotaResume
+            );
+        }
+        for status in ["failed", "blocked", "missed", "cancelled"] {
+            assert_eq!(attempt_kind_for_status(status).unwrap(), AttemptKind::Retry);
+        }
+        for status in ["completed", "scheduled", "running"] {
+            assert!(attempt_kind_for_status(status).is_err(), "{status}");
+        }
+    }
+
+    #[test]
+    fn retry_preview_is_read_only_and_complete() {
+        let mut store = Store::in_memory().unwrap();
+        let source = store
+            .schedule_batch(sample_input("retry-preview-source", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        store
+            .set_status(&source.id, "failed", Some("fixture"))
+            .unwrap();
+        let before = (
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM batches", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+        );
+        let preview = store
+            .preview_retry_task(&source.id, &retry_options(true))
+            .unwrap();
+        let after = (
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM batches", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+        );
+        assert_eq!(before, after);
+        assert_eq!(preview.attempt_kind, "retry");
+        assert_eq!(preview.attempt_number, 2);
+        assert_eq!(preview.resume_mode, "fresh_session");
+        assert_eq!(preview.task.prompt, source.prompt);
+        assert_eq!(preview.budget.weekly_cap_percent, Some(2.0));
+    }
+
+    #[test]
+    fn retry_creation_is_atomic_idempotent_and_preserves_source_history() {
+        let mut store = Store::in_memory().unwrap();
+        let source = store
+            .schedule_batch(sample_input("retry-create-source", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        store
+            .set_status(&source.id, "failed", Some("fixture failure"))
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO runs (id,task_id,started_at,finished_at,status,error) VALUES ('source-run',?1,1,2,'failed','fixture failure')",
+                params![source.id],
+            )
+            .unwrap();
+        let before = store.task_status(&source.id).unwrap().unwrap();
+        let source_task_before = serde_json::to_string(&before.task).unwrap();
+        let source_runs_before = serde_json::to_string(&before.runs).unwrap();
+        let first = store
+            .create_retry_task(
+                &source.id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "retry-create-key".into(),
+                    confirmed: true,
+                    options: retry_options(true),
+                },
+            )
+            .unwrap();
+        let replay = store
+            .create_retry_task(
+                &source.id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "retry-create-key".into(),
+                    confirmed: true,
+                    options: retry_options(true),
+                },
+            )
+            .unwrap();
+        assert!(!first.idempotent_replay);
+        assert!(replay.idempotent_replay);
+        assert_eq!(first.task.id, replay.task.id);
+        assert_eq!(first.batch.id, replay.batch.id);
+        assert_eq!(first.batch.weekly_cap_percent, Some(2.0));
+        assert_eq!(
+            first.task.source_task_id.as_deref(),
+            Some(source.id.as_str())
+        );
+        assert_eq!(first.task.attempt_kind.as_deref(), Some("retry"));
+        assert_eq!(first.task.attempt_number, 2);
+        assert_eq!(first.task.depends_on_task_id, None);
+        assert_eq!(first.task.dependency_type, "success");
+        let after = store.task_status(&source.id).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_string(&after.task).unwrap(),
+            source_task_before
+        );
+        assert_eq!(
+            serde_json::to_string(&after.runs).unwrap(),
+            source_runs_before
+        );
+        assert_eq!(after.lineage.len(), 2);
+    }
+
+    #[test]
+    fn retry_confirmation_requires_true_and_key_owned_by_attempt() {
+        let mut store = Store::in_memory().unwrap();
+        let source = store
+            .schedule_batch(sample_input("retry-confirm-source", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        store
+            .set_status(&source.id, "failed", Some("fixture"))
+            .unwrap();
+        let error = store
+            .create_retry_task(
+                &source.id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "retry-unconfirmed".into(),
+                    confirmed: false,
+                    options: retry_options(true),
+                },
+            )
+            .unwrap_err();
+        assert!(error.contains("explicit confirmation"));
+        let collision = store
+            .create_retry_task(
+                &source.id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "retry-confirm-source".into(),
+                    confirmed: true,
+                    options: retry_options(true),
+                },
+            )
+            .unwrap_err();
+        assert!(collision.contains("already used by another operation"));
+    }
+
+    #[test]
+    fn retry_idempotency_and_lineage_survive_reopen() {
+        let path = std::env::temp_dir().join(new_id("limitwise-c04-reopen"));
+        let (source_id, attempt_id) = {
+            let mut store = Store::from_connection(Connection::open(&path).unwrap()).unwrap();
+            let source = store
+                .schedule_batch(sample_input("retry-reopen-source", 1.0))
+                .unwrap()
+                .tasks
+                .remove(0);
+            store
+                .set_status(&source.id, "failed", Some("fixture"))
+                .unwrap();
+            let created = store
+                .create_retry_task(
+                    &source.id,
+                    ConfirmedRetryTaskInput {
+                        idempotency_key: "retry-reopen-key".into(),
+                        confirmed: true,
+                        options: retry_options(true),
+                    },
+                )
+                .unwrap();
+            (source.id, created.task.id)
+        };
+        let mut reopened = Store::from_connection(Connection::open(&path).unwrap()).unwrap();
+        let replay = reopened
+            .create_retry_task(
+                &source_id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "retry-reopen-key".into(),
+                    confirmed: true,
+                    options: retry_options(true),
+                },
+            )
+            .unwrap();
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.task.id, attempt_id);
+        assert_eq!(reopened.task_lineage(&source_id).unwrap().len(), 2);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn retry_transaction_rolls_back_partial_creation_before_reopen() {
+        let path = std::env::temp_dir().join(new_id("limitwise-c04-crash"));
+        let source_id = {
+            let mut store = Store::from_connection(Connection::open(&path).unwrap()).unwrap();
+            let source = store
+                .schedule_batch(sample_input("retry-crash-source", 1.0))
+                .unwrap()
+                .tasks
+                .remove(0);
+            store
+                .set_status(&source.id, "failed", Some("fixture"))
+                .unwrap();
+            {
+                let transaction = store
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                transaction
+                    .execute(
+                        "INSERT INTO batches (id,idempotency_key,cap_percent,cap_basis,budget_mode,created_at) VALUES ('partial-batch','retry-crash-key',1,'total_weekly_percent','percentage',1)",
+                        [],
+                    )
+                    .unwrap();
+            }
+            source.id
+        };
+        let mut reopened = Store::from_connection(Connection::open(&path).unwrap()).unwrap();
+        assert!(reopened
+            .batch_by_idempotency("retry-crash-key")
+            .unwrap()
+            .is_none());
+        let created = reopened
+            .create_retry_task(
+                &source_id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "retry-crash-key".into(),
+                    confirmed: true,
+                    options: retry_options(true),
+                },
+            )
+            .unwrap();
+        assert!(!created.idempotent_replay);
+        assert_eq!(
+            created.task.source_task_id.as_deref(),
+            Some(source_id.as_str())
+        );
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn quota_resume_uses_reset_and_session_or_context_fallback_only() {
+        let mut store = Store::in_memory().unwrap();
+        let with_session = store
+            .schedule_batch(sample_input("quota-attempt-session", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        let future_reset = now_epoch() + 600;
+        mark_quota_limited(
+            &store,
+            &with_session.id,
+            "quota_interrupted",
+            future_reset,
+            Some("session-c04"),
+            Some("/tmp/c04.jsonl"),
+        );
+        let preview = store
+            .preview_retry_task(&with_session.id, &retry_options(false))
+            .unwrap();
+        assert_eq!(preview.run_at, future_reset);
+        assert_eq!(preview.provider_reset_at, Some(future_reset));
+        assert_eq!(preview.resume_mode, "session_resume_or_context_fallback");
+        let created = store
+            .create_retry_task(
+                &with_session.id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "quota-attempt-session-key".into(),
+                    confirmed: true,
+                    options: retry_options(false),
+                },
+            )
+            .unwrap();
+        assert_eq!(created.task.attempt_kind.as_deref(), Some("quota_resume"));
+        assert_eq!(created.task.dependency_type, "quota_reset");
+        assert_eq!(
+            created.task.depends_on_task_id.as_deref(),
+            Some(with_session.id.as_str())
+        );
+        assert_eq!(
+            store
+                .continuation_context(&created.task)
+                .unwrap()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("session-c04")
+        );
+
+        let fallback = store
+            .schedule_batch(sample_input("quota-attempt-fallback", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        let passed_reset = now_epoch() - 60;
+        mark_quota_limited(
+            &store,
+            &fallback.id,
+            "quota_skipped",
+            passed_reset,
+            None,
+            Some("/tmp/c04-fallback.jsonl"),
+        );
+        let fallback_preview = store
+            .preview_retry_task(&fallback.id, &retry_options(false))
+            .unwrap();
+        assert_eq!(fallback_preview.run_at, passed_reset);
+        assert_eq!(fallback_preview.provider_reset_at, Some(passed_reset));
+        assert_eq!(fallback_preview.resume_mode, "context_fallback");
+        let fallback_created = store
+            .create_retry_task(
+                &fallback.id,
+                ConfirmedRetryTaskInput {
+                    idempotency_key: "quota-attempt-fallback-key".into(),
+                    confirmed: true,
+                    options: retry_options(false),
+                },
+            )
+            .unwrap();
+        assert_eq!(fallback_created.task.run_at, fallback_preview.run_at);
+    }
+
+    #[test]
+    fn quota_outcomes_without_valid_reset_metadata_allow_only_fresh_retry() {
+        let mut store = Store::in_memory().unwrap();
+        let source = store
+            .schedule_batch(sample_input("quota-attempt-missing", 1.0))
+            .unwrap()
+            .tasks
+            .remove(0);
+        store
+            .set_status(&source.id, "quota_skipped", Some("quota"))
+            .unwrap();
+        assert!(store
+            .preview_retry_task(&source.id, &retry_options(false))
+            .unwrap_err()
+            .contains("run_at is required for retry"));
+        let missing_fallback = store
+            .preview_retry_task(&source.id, &retry_options(true))
+            .unwrap();
+        assert_eq!(missing_fallback.attempt_kind, "retry");
+        assert_eq!(missing_fallback.resume_mode, "fresh_session");
+
+        mark_quota_limited(&store, &source.id, "quota_skipped", 0, None, None);
+        assert!(store
+            .preview_retry_task(&source.id, &retry_options(false))
+            .unwrap_err()
+            .contains("run_at is required for retry"));
+        assert_eq!(
+            store
+                .preview_retry_task(&source.id, &retry_options(true))
+                .unwrap()
+                .attempt_kind,
+            "retry"
+        );
     }
 
     #[test]
@@ -1632,7 +3764,7 @@ mod tests {
         assert!(!first.idempotent_replay);
         assert!(second.idempotent_replay);
         assert_eq!(first.batch.id, second.batch.id);
-        assert_eq!(first.tasks[0].model, "gpt-5.6-terra");
+        assert_eq!(first.tasks[0].model, "gpt-6-sol");
         assert_eq!(first.batch.five_hour_cap_percent, None);
     }
 
@@ -1917,18 +4049,19 @@ mod tests {
         let snapshot = UsageSnapshot {
             adapter: "test".into(),
             captured_at: now_epoch(),
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 used_percent: 90.0,
                 remaining_percent: 10.0,
                 duration_minutes: 300,
                 resets_at: reset_at,
-            },
+            }),
             weekly: RateWindow {
                 used_percent: 20.0,
                 remaining_percent: 80.0,
                 duration_minutes: 10_080,
                 resets_at: reset_at + 10_000,
             },
+            warnings: Vec::new(),
         };
         let usage = serde_json::to_string(&snapshot).unwrap();
         store
@@ -2114,6 +4247,7 @@ mod tests {
             difficulty: Difficulty::Simple,
             model: None,
             effort: None,
+            permission_profile: PermissionProfile::Restricted,
         });
         let mut store = Store::in_memory().unwrap();
         let created = store.schedule_batch(input).unwrap();
@@ -2154,6 +4288,7 @@ mod tests {
             difficulty: Difficulty::Simple,
             model: None,
             effort: None,
+            permission_profile: PermissionProfile::Restricted,
         });
         let mut store = Store::in_memory().unwrap();
         let created = store.schedule_batch(input).unwrap();
@@ -2234,5 +4369,91 @@ mod tests {
         assert_eq!(task.position, 0);
         assert_eq!(task.depends_on_task_id, None);
         assert_eq!(task.dependency_type, "success");
+        assert_eq!(task.source_task_id, None);
+        assert_eq!(task.attempt_kind, None);
+        assert_eq!(task.attempt_number, 1);
+        assert_eq!(task.permission_profile, PermissionProfile::Restricted);
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE tasks SET permission_profile='danger-full-access' WHERE id='t'",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn attempt_lineage_migration_is_additive_and_repeatable_for_legacy_database() {
+        let path = std::env::temp_dir().join(new_id("limitwise-c04-legacy"));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE batches (
+                   id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL UNIQUE,cap_percent REAL NOT NULL,
+                   created_at INTEGER NOT NULL,window_reset_at INTEGER,baseline_weekly_used_percent REAL,
+                   allowance_points REAL NOT NULL DEFAULT 0,consumed_points REAL NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE tasks (
+                   id TEXT PRIMARY KEY,batch_id TEXT NOT NULL REFERENCES batches(id),title TEXT NOT NULL,
+                   prompt TEXT NOT NULL,success_criteria TEXT NOT NULL,cwd TEXT NOT NULL,run_at INTEGER NOT NULL,
+                   timezone TEXT NOT NULL,difficulty TEXT NOT NULL,model TEXT NOT NULL,effort TEXT NOT NULL,
+                   status TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_error TEXT
+                 );
+                 CREATE TABLE runs (
+                   id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),started_at INTEGER NOT NULL,
+                   finished_at INTEGER,status TEXT NOT NULL,usage_before_json TEXT,usage_after_json TEXT,
+                   session_id TEXT,transcript_path TEXT,tokens_used INTEGER,
+                   token_usage_state TEXT NOT NULL DEFAULT 'pending',error TEXT
+                 );
+                 INSERT INTO batches (id,idempotency_key,cap_percent,created_at) VALUES ('legacy-batch','legacy-key',25,7);
+                 INSERT INTO tasks (id,batch_id,title,prompt,success_criteria,cwd,run_at,timezone,difficulty,model,effort,status,created_at,updated_at,last_error)
+                 VALUES ('legacy-task','legacy-batch','Legacy title','Legacy prompt','Legacy done','/tmp',4102444800,'UTC','simple','gpt-5.6-luna','low','failed',8,9,'Legacy error');
+                 INSERT INTO runs (id,task_id,started_at,finished_at,status,usage_before_json,usage_after_json,session_id,transcript_path,tokens_used,token_usage_state,error)
+                 VALUES ('legacy-run','legacy-task',10,11,'failed','before','after','legacy-session','/tmp/legacy.jsonl',47,'reported','Legacy run error');",
+            )
+            .unwrap();
+        drop(connection);
+
+        for _ in 0..2 {
+            let store = Store::from_connection(Connection::open(&path).unwrap()).unwrap();
+            let task = store.task("legacy-task").unwrap().unwrap();
+            assert_eq!(task.title, "Legacy title");
+            assert_eq!(task.prompt, "Legacy prompt");
+            assert_eq!(task.success_criteria, "Legacy done");
+            assert_eq!(task.cwd, "/tmp");
+            assert_eq!(task.run_at, 4_102_444_800);
+            assert_eq!(task.timezone, "UTC");
+            assert_eq!(task.difficulty, "simple");
+            assert_eq!(task.model, "gpt-5.6-luna");
+            assert_eq!(task.effort, "low");
+            assert_eq!(task.status, "failed");
+            assert_eq!(task.created_at, 8);
+            assert_eq!(task.updated_at, 9);
+            assert_eq!(task.last_error.as_deref(), Some("Legacy error"));
+            assert_eq!(task.depends_on_task_id, None);
+            assert_eq!(task.dependency_type, "success");
+            assert_eq!(task.source_task_id, None);
+            assert_eq!(task.attempt_kind, None);
+            assert_eq!(task.attempt_number, 1);
+            assert_eq!(task.permission_profile, PermissionProfile::Restricted);
+            let runs = store.task_status("legacy-task").unwrap().unwrap().runs;
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].id, "legacy-run");
+            assert_eq!(runs[0].task_id, "legacy-task");
+            assert_eq!(runs[0].started_at, 10);
+            assert_eq!(runs[0].finished_at, Some(11));
+            assert_eq!(runs[0].status, "failed");
+            assert_eq!(runs[0].usage_before_json.as_deref(), Some("before"));
+            assert_eq!(runs[0].usage_after_json.as_deref(), Some("after"));
+            assert_eq!(runs[0].session_id.as_deref(), Some("legacy-session"));
+            assert_eq!(
+                runs[0].transcript_path.as_deref(),
+                Some("/tmp/legacy.jsonl")
+            );
+            assert_eq!(runs[0].tokens_used, Some(47));
+            assert_eq!(runs[0].token_usage_state, "reported");
+            assert_eq!(runs[0].error.as_deref(), Some("Legacy run error"));
+        }
+        let _ = std::fs::remove_file(path);
     }
 }

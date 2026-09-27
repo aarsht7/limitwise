@@ -17,6 +17,7 @@ It can:
 - warn when a budget may be too small;
 - stop or skip work when quota is unavailable or nearly exhausted;
 - record task status and token usage locally.
+- manage the same capabilities in a bearer-authenticated browser UI bound only to `127.0.0.1`.
 
 LimitWise includes Linux and macOS support, but only Linux x86-64 has been tested.
 
@@ -58,7 +59,26 @@ Quick verification after install:
 ```sh
 codex plugin list
 codex plugin marketplace list
+limitwise doctor
 ```
+
+`limitwise doctor` performs a read-only health check of the platform, binaries, Codex login and quota telemetry, plugin/MCP registration, local storage, database, optional service, and a bounded daemon error-log tail. Use `limitwise doctor --json` for the versioned machine-readable report. Exit `0` means usable (warnings allowed), `1` means at least one blocking check failed, and `2` means invalid doctor arguments or diagnostic execution failed. Doctor never installs, migrates, repairs, restarts, or refreshes anything, and its evidence excludes secrets, prompts, transcript contents, bearer tokens, and environment values.
+
+Launch the foreground local browser UI with:
+
+```sh
+limitwise ui
+limitwise ui --no-open
+limitwise ui --port 43121
+```
+
+The UI is served from assets embedded in the Rust binary, listens only on `127.0.0.1`, uses a per-launch bearer obtained through a one-time browser bootstrap, and requires no runtime Node installation. It provides a gradient-free high-contrast dark theme by default, a persisted warm off-white/cream light-theme option, a batch-grouped dashboard with newest-first sorting and 20-batch pages, atomic pending-chain editing with task reorder/add/remove, a linear composer in both modes, a launch-directory default with native folder selection, a required weekly-percentage limit for every new UI batch, selectable planning models and task permission profiles with Codex Plan-mode routing and explicit approval in Simple mode, manual routing in Advanced mode, estimates plus exact confirmation, pending-task update/cancel, running-task stop, terminal retry/resume, soft removal with retained run metadata, and confirmed daemon setup. An active batch editor pauses the first task; if its start time passes, the user must choose a future time before saving. It never renders transcript contents. See [local browser UI](docs/local-browser-ui.md) for its security model and limitations.
+
+## Demo videos
+
+- [Watch the GUI and CLI demos](docs/demos.md)
+- [GUI workflow MP4](docs/assets/videos/limitwise-gui.mp4)
+- [CLI workflow MP4](docs/assets/videos/limitwise-cli.mp4)
 
 For service status:
 
@@ -118,7 +138,7 @@ Open Plan mode and tell Codex what to run, where to run it, the exact local time
 Use $schedule-codex-tasks. Plan this batch, but do not schedule it yet.
 ```
 
-LimitWise checks your quota, chooses a model and reasoning effort, estimates usage from previous local runs, and shows a proposal. Review it and confirm it. Leave Plan mode, then say:
+LimitWise checks your quota, reads the visible models and per-model reasoning efforts from the installed Codex app-server, chooses a supported route, estimates usage from previous local runs, and shows a proposal. Advanced, update, and retry selectors expose the same catalog, including `max` or `ultra` only when the selected model supports them. Review the proposal and confirm it. Leave Plan mode, then say:
 
 ```text
 Create this confirmed schedule.
@@ -211,6 +231,7 @@ Modified by LimitWise
 | Cancel a task | `Cancel scheduled LimitWise task TASK_ID.` |
 | Check quota | `Show my current five-hour and weekly Codex usage and reset times.` |
 | Check token usage | `Show my LimitWise token stats for the last year, month, week, and each of the last seven days.` |
+| Diagnose setup | `Run the read-only LimitWise diagnostics snapshot.` |
 
 Only tasks that have not started can be changed or cancelled.
 
@@ -220,21 +241,22 @@ Only tasks that have not started can be changed or cancelled.
 - **Tokens:** one token cap is shared by the whole batch. A running task can slightly exceed it because Codex reports usage at turn boundaries.
 - **Optional five-hour cap:** limits one batch to the selected percentage points in each provider five-hour window. It resets with that window. Omitting it adds no batch-specific five-hour cap.
 
-Both modes keep a 10% reserve in the rolling five-hour window. If quota data is missing, LimitWise does not start Codex.
+Both modes keep a 10% reserve in the rolling five-hour window when that telemetry is available. If only five-hour telemetry is missing, LimitWise warns and continues with the weekly limit or token budget; the global reserve and any five-hour batch cap cannot be enforced. Missing weekly telemetry or ambiguous telemetry still blocks Codex.
 
-## Continue after quota reset
+## Retry or continue without rewriting history
 
-If a task ends as `quota_interrupted` or `quota_skipped`, create a new confirmed batch with `continue_from_task_id` set to that task ID. LimitWise schedules it for the predecessor's five-hour reset, gives it a fresh weekly or token budget, and resumes the stored Codex session when supported and available. Otherwise, it starts a fresh session with predecessor, transcript excerpt, and worktree context.
+Eligible task detail offers one explicit action. `quota_interrupted` and `quota_skipped` tasks can **Continue after quota reset** using the stored reset and session resume when available, with predecessor/transcript/worktree fallback otherwise. `failed`, `blocked`, `missed`, and `cancelled` tasks can **Retry as new run** at a selected future time with a fresh session. Completed, scheduled, and running tasks cannot create attempts.
 
-Continuations are never created automatically. Failed, cancelled, blocked, missed, running, completed, and scheduled tasks cannot be continuation sources. If the global 10% reserve still blocks a continuation at reset, LimitWise defers that same scheduled task to the next reset.
+Both actions require a fresh percentage or token budget and a read-only preview before confirmation. Confirmation creates a new idempotent batch/task with queryable attempt lineage; it never changes the source task or run history. The global 10% rolling five-hour reserve remains mandatory whenever that telemetry is available. If it still blocks a quota resume at reset, LimitWise defers that same new attempt to the next provider reset.
 
 ## More help
 
 - [Getting started](docs/getting-started.md)
 - [Scheduling and managing tasks](docs/using-limitwise.md)
+- [Local browser UI](docs/local-browser-ui.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/ARCHITECTURE.md)
 
-LimitWise stores its database and transcripts privately on your computer. It runs Codex with write access only to the selected project, no interactive approvals, and no external apps or network access.
+LimitWise stores its database and transcripts privately on your computer. Every task uses `workspace-write` in the selected project, no interactive approvals, and no external apps. The default `restricted` profile disables network and web search. The separately confirmed `networked` profile enables only network and web search; it does not enable external apps, interactive approval, `danger-full-access`, or another sandbox.
 
 Licensed under the [MIT License](LICENSE).

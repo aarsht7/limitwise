@@ -2,6 +2,7 @@ use crate::config::{
     codex_binary, poll_seconds, set_private_file, Paths, FIVE_HOUR_RESERVE_PERCENT,
     MISSED_GRACE_SECONDS,
 };
+use crate::model::PermissionProfile;
 use crate::store::{now_epoch, Batch, ContinuationContext, RunFinish, Store, Task};
 use crate::transcript::token_usage;
 use crate::usage::{UsageClient, UsageSnapshot};
@@ -12,9 +13,10 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const INTERRUPT_WAIT_STEPS: usize = 20;
+const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 static CODEX_RESUME_SUPPORTED: OnceLock<bool> = OnceLock::new();
 
 pub fn daemon(once: bool) -> Result<(), String> {
@@ -50,6 +52,7 @@ pub fn daemon(once: bool) -> Result<(), String> {
                 }
                 if let Err(error) = process_claimed_task(&mut store, &task) {
                     let _ = store.set_status(&task.id, "failed", Some(&error));
+                    let _ = store.clear_task_stop_request(&task.id);
                     notify(&task.title, &format!("failed: {error}"));
                 }
             }
@@ -62,7 +65,7 @@ pub fn daemon(once: bool) -> Result<(), String> {
 }
 
 fn process_claimed_task(store: &mut Store, task: &Task) -> Result<(), String> {
-    let eligible_at = if task.dependency_type == "success" {
+    let eligible_at = if task.depends_on_task_id.is_some() && task.dependency_type == "success" {
         store
             .dependency_completed_at(task)?
             .ok_or_else(|| "prerequisite task is not completed".to_string())?
@@ -91,9 +94,17 @@ fn process_claimed_task(store: &mut Store, task: &Task) -> Result<(), String> {
             )
         }
     };
+    if store.task_stop_requested(&task.id)? {
+        return record_without_launch(store, task, "cancelled", "Stopped by user");
+    }
     if should_defer_continuation(task, &before) {
         let reason = "global 5-hour reserve still prevents continuation; deferred to next reset";
-        store.defer_continuation(&task.id, before.five_hour.resets_at, reason)?;
+        let reset_at = before
+            .five_hour
+            .as_ref()
+            .ok_or_else(|| "cannot defer continuation without 5-hour telemetry".to_string())?
+            .resets_at;
+        store.defer_continuation(&task.id, reset_at, reason)?;
         notify(&task.title, reason);
         return Ok(());
     }
@@ -110,13 +121,18 @@ fn process_claimed_task(store: &mut Store, task: &Task) -> Result<(), String> {
         )?;
         store.reconcile_consumption(&task.batch_id, before.weekly.used_percent)?;
     }
-    store.ensure_five_hour_window(
-        &task.batch_id,
-        before.five_hour.used_percent,
-        before.five_hour.resets_at,
-    )?;
-    budget =
-        store.reconcile_five_hour_consumption(&task.batch_id, before.five_hour.used_percent)?;
+    if let Some(five_hour) = &before.five_hour {
+        store.ensure_five_hour_window(
+            &task.batch_id,
+            five_hour.used_percent,
+            five_hour.resets_at,
+        )?;
+        budget = store.reconcile_five_hour_consumption(&task.batch_id, five_hour.used_percent)?;
+    }
+    let mut five_hour_warning_sent = before.five_hour.is_none();
+    if five_hour_warning_sent {
+        notify(&task.title, missing_five_hour_warning(&budget));
+    }
 
     if global_reserve_reached(&before) {
         return finish_without_launch(
@@ -138,7 +154,7 @@ fn process_claimed_task(store: &mut Store, task: &Task) -> Result<(), String> {
             Some(&before),
         );
     }
-    if budget_exhausted(&budget) {
+    if budget_exhausted(&budget, before.five_hour.is_some()) {
         return finish_without_launch(
             store,
             task,
@@ -158,23 +174,40 @@ fn process_claimed_task(store: &mut Store, task: &Task) -> Result<(), String> {
     let mut last = before.clone();
     let mut recorded_task_tokens = 0;
     let mut interrupt_reason = None;
+    let mut user_stopped = false;
+    let quota_poll_interval = Duration::from_secs(poll_seconds());
+    let mut last_quota_poll = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break status;
         }
-        thread::sleep(Duration::from_secs(poll_seconds()));
+        if store.task_stop_requested(&task.id)? {
+            user_stopped = true;
+            break interrupt_child(&mut child)?;
+        }
+        if last_quota_poll.elapsed() < quota_poll_interval {
+            thread::sleep(CONTROL_POLL_INTERVAL);
+            continue;
+        }
+        last_quota_poll = Instant::now();
         match client.fetch() {
             Ok(snapshot) => {
                 if budget.budget_mode == "percentage" {
                     update_percentage_budget(store, &task.batch_id, &last, &snapshot)?;
                 }
                 budget = update_five_hour_budget(store, &task.batch_id, &last, &snapshot)?;
+                if snapshot.five_hour.is_none() && !five_hour_warning_sent {
+                    notify(&task.title, missing_five_hour_warning(&budget));
+                    five_hour_warning_sent = true;
+                } else if snapshot.five_hour.is_some() {
+                    five_hour_warning_sent = false;
+                }
                 last = snapshot;
                 if global_reserve_reached(&last) {
                     interrupt_reason = Some("rolling 5-hour usage reached 90%".to_string());
                 } else if last.weekly.used_percent >= 100.0 {
                     interrupt_reason = Some("weekly usage was exhausted".to_string());
-                } else if budget_exhausted(&budget) {
+                } else if budget_exhausted(&budget, last.five_hour.is_some()) {
                     interrupt_reason = Some(budget_exhausted_reason(&budget).to_string());
                 }
             }
@@ -189,7 +222,7 @@ fn process_claimed_task(store: &mut Store, task: &Task) -> Result<(), String> {
                         .add_token_consumption(&task.batch_id, observed - recorded_task_tokens)?;
                     recorded_task_tokens = observed;
                 }
-                if budget_exhausted(&budget) {
+                if budget_exhausted(&budget, last.five_hour.is_some()) {
                     interrupt_reason = Some(budget_exhausted_reason(&budget).to_string());
                 }
             }
@@ -235,7 +268,9 @@ fn process_claimed_task(store: &mut Store, task: &Task) -> Result<(), String> {
     } else {
         None
     };
-    let (final_status, error) = if let Some(reason) = interrupt_reason {
+    let (final_status, error) = if user_stopped {
+        ("cancelled", Some("Stopped by user".to_string()))
+    } else if let Some(reason) = interrupt_reason {
         ("quota_interrupted", Some(reason))
     } else if let Some(reason) = token_accounting_error {
         ("failed", Some(reason))
@@ -261,6 +296,7 @@ fn process_claimed_task(store: &mut Store, task: &Task) -> Result<(), String> {
         },
     )?;
     store.set_status(&task.id, final_status, error.as_deref())?;
+    store.clear_task_stop_request(&task.id)?;
     notify_with_tokens(&task.title, final_status, observed_tokens);
     Ok(())
 }
@@ -284,6 +320,7 @@ fn record_without_launch(
         },
     )?;
     store.set_status(&task.id, status, Some(reason))?;
+    store.clear_task_stop_request(&task.id)?;
     notify_with_tokens(&task.title, status, Some(0));
     Ok(())
 }
@@ -309,6 +346,7 @@ fn finish_without_launch(
         },
     )?;
     store.set_status(&task.id, status, Some(reason))?;
+    store.clear_task_stop_request(&task.id)?;
     notify_with_tokens(&task.title, status, Some(0));
     Ok(())
 }
@@ -341,23 +379,28 @@ fn update_five_hour_budget(
     previous: &UsageSnapshot,
     current: &UsageSnapshot,
 ) -> Result<Batch, String> {
+    let Some(current_five_hour) = &current.five_hour else {
+        return store
+            .batch(batch_id)?
+            .ok_or_else(|| "task batch not found".to_string());
+    };
     let mut budget = store.ensure_five_hour_window(
         batch_id,
-        current.five_hour.used_percent,
-        current.five_hour.resets_at,
+        current_five_hour.used_percent,
+        current_five_hour.resets_at,
     )?;
-    if previous.five_hour.resets_at == current.five_hour.resets_at {
-        let delta = (current.five_hour.used_percent - previous.five_hour.used_percent).max(0.0);
-        if delta > 0.0 {
+    if let Some(previous_five_hour) = &previous.five_hour {
+        let delta = (current_five_hour.used_percent - previous_five_hour.used_percent).max(0.0);
+        if previous_five_hour.resets_at == current_five_hour.resets_at && delta > 0.0 {
             budget = store.add_five_hour_consumption(batch_id, delta)?;
         }
     }
     store
-        .reconcile_five_hour_consumption(batch_id, current.five_hour.used_percent)
+        .reconcile_five_hour_consumption(batch_id, current_five_hour.used_percent)
         .or(Ok(budget))
 }
 
-fn budget_exhausted(batch: &Batch) -> bool {
+fn budget_exhausted(batch: &Batch, enforce_five_hour: bool) -> bool {
     let primary_exhausted = if batch.budget_mode == "tokens" {
         match batch.token_cap {
             Some(cap) => batch.consumed_tokens >= cap,
@@ -368,7 +411,8 @@ fn budget_exhausted(batch: &Batch) -> bool {
             || batch.consumed_points + f64::EPSILON >= batch.allowance_points
     };
     primary_exhausted
-        || (batch.five_hour_cap_percent.is_some()
+        || (enforce_five_hour
+            && batch.five_hour_cap_percent.is_some()
             && (batch.five_hour_allowance_points <= 0.0
                 || batch.five_hour_consumed_points + f64::EPSILON
                     >= batch.five_hour_allowance_points))
@@ -388,11 +432,22 @@ fn budget_exhausted_reason(batch: &Batch) -> &'static str {
 }
 
 fn global_reserve_reached(snapshot: &UsageSnapshot) -> bool {
-    snapshot.five_hour.used_percent >= 100.0 - FIVE_HOUR_RESERVE_PERCENT
+    snapshot
+        .five_hour
+        .as_ref()
+        .is_some_and(|window| window.used_percent >= 100.0 - FIVE_HOUR_RESERVE_PERCENT)
 }
 
 fn should_defer_continuation(task: &Task, snapshot: &UsageSnapshot) -> bool {
     task.dependency_type == "quota_reset" && global_reserve_reached(snapshot)
+}
+
+fn missing_five_hour_warning(batch: &Batch) -> &'static str {
+    if batch.budget_mode == "tokens" {
+        "warning: 5-hour quota telemetry is unavailable; continuing with the token budget; the global reserve and any 5-hour batch cap cannot be enforced"
+    } else {
+        "warning: 5-hour quota telemetry is unavailable; continuing with the weekly limit; the global reserve and any 5-hour batch cap cannot be enforced"
+    }
 }
 
 fn private_output_file(path: &Path) -> Result<File, String> {
@@ -426,15 +481,7 @@ fn spawn_codex(
         .arg(&task.model)
         .arg("-c")
         .arg(format!("model_reasoning_effort=\"{}\"", task.effort))
-        .arg("-c")
-        .arg("approval_policy=\"never\"")
-        .arg("-c")
-        .arg("sandbox_workspace_write.network_access=false")
-        .arg("-c")
-        .arg("web_search=\"disabled\"")
-        .arg("-c")
-        .arg("features.apps=false")
-        .args(["--sandbox", "workspace-write"])
+        .args(codex_permission_arguments(task.permission_profile))
         .args(["--ignore-user-config", "--skip-git-repo-check", "--json"])
         .arg("--cd")
         .arg(&task.cwd);
@@ -454,6 +501,31 @@ fn spawn_codex(
     command
         .spawn()
         .map_err(|e| format!("cannot start Codex task: {e}"))
+}
+
+fn codex_permission_arguments(profile: PermissionProfile) -> [&'static str; 10] {
+    let (network_access, web_search) = match profile {
+        PermissionProfile::Restricted => (
+            "sandbox_workspace_write.network_access=false",
+            "web_search=\"disabled\"",
+        ),
+        PermissionProfile::Networked => (
+            "sandbox_workspace_write.network_access=true",
+            "web_search=\"live\"",
+        ),
+    };
+    [
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        network_access,
+        "-c",
+        web_search,
+        "-c",
+        "features.apps=false",
+        "--sandbox",
+        "workspace-write",
+    ]
 }
 
 fn resumable_session_id(
@@ -505,8 +577,14 @@ fn codex_prompt(
             excerpt,
         )
     });
+    let permission_constraints = match task.permission_profile {
+        PermissionProfile::Restricted => "do not use network or external apps",
+        PermissionProfile::Networked => {
+            "network and web search are allowed; do not use external apps"
+        }
+    };
     format!(
-        "Execute this previously confirmed one-off task.\n\nTask: {}\n\nPrompt:\n{}\n\nSuccess criteria:\n{}\n\nConstraints: work only inside the selected project; do not use network or external apps; do not perform destructive or approval-dependent actions. If any such action is required, report that the task is blocked.\n\nOutput style: keep final summaries terse. Remove filler, repeated summaries, and unnecessary explanation. Preserve exact commands, file paths, code, JSON, timestamps, IDs, model names, effort values, and error text. Do not shorten safety warnings or any wording where brevity could change meaning.",
+        "Execute this previously confirmed one-off task.\n\nTask: {}\n\nPrompt:\n{}\n\nSuccess criteria:\n{}\n\nConstraints: work only inside the selected project; {permission_constraints}; do not perform destructive or approval-dependent actions. If any such action is required, report that the task is blocked.\n\nOutput style: keep final summaries terse. Remove filler, repeated summaries, and unnecessary explanation. Preserve exact commands, file paths, code, JSON, timestamps, IDs, model names, effort values, and error text. Do not shorten safety warnings or any wording where brevity could change meaning.",
         task.title, task.prompt, task.success_criteria
     )
     + &continuation_context
@@ -635,7 +713,7 @@ mod tests {
             five_hour_allowance_points: 0.0,
             five_hour_consumed_points: 0.0,
         };
-        assert!(budget_exhausted(&batch));
+        assert!(budget_exhausted(&batch, true));
     }
 
     #[test]
@@ -660,7 +738,37 @@ mod tests {
             five_hour_allowance_points: 0.0,
             five_hour_consumed_points: 0.0,
         };
-        assert!(budget_exhausted(&batch));
+        assert!(budget_exhausted(&batch, true));
+    }
+
+    #[test]
+    fn missing_five_hour_telemetry_does_not_exhaust_primary_budget() {
+        let batch = Batch {
+            id: "b".into(),
+            idempotency_key: "i".into(),
+            budget_mode: "percentage".into(),
+            weekly_cap_percent: Some(50.0),
+            token_cap: None,
+            consumed_tokens: 0,
+            cap_percent: 50.0,
+            cap_basis: "total_weekly_percent".into(),
+            created_at: 0,
+            window_reset_at: Some(1),
+            baseline_weekly_used_percent: Some(40.0),
+            allowance_points: 30.0,
+            consumed_points: 10.0,
+            five_hour_cap_percent: Some(5.0),
+            five_hour_window_reset_at: None,
+            baseline_five_hour_used_percent: None,
+            five_hour_allowance_points: 0.0,
+            five_hour_consumed_points: 0.0,
+        };
+        assert!(!budget_exhausted(&batch, false));
+        assert!(budget_exhausted(&batch, true));
+        assert_eq!(
+            missing_five_hour_warning(&batch),
+            "warning: 5-hour quota telemetry is unavailable; continuing with the weekly limit; the global reserve and any 5-hour batch cap cannot be enforced"
+        );
     }
 
     #[test]
@@ -669,6 +777,50 @@ mod tests {
             find_session_id("{\"type\":\"thread.started\",\"thread_id\":\"abc\"}"),
             Some("abc".into())
         );
+    }
+
+    #[test]
+    fn permission_profiles_map_to_exact_safe_arguments() {
+        assert_eq!(
+            codex_permission_arguments(PermissionProfile::Restricted),
+            [
+                "-c",
+                "approval_policy=\"never\"",
+                "-c",
+                "sandbox_workspace_write.network_access=false",
+                "-c",
+                "web_search=\"disabled\"",
+                "-c",
+                "features.apps=false",
+                "--sandbox",
+                "workspace-write",
+            ]
+        );
+        assert_eq!(
+            codex_permission_arguments(PermissionProfile::Networked),
+            [
+                "-c",
+                "approval_policy=\"never\"",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "-c",
+                "web_search=\"live\"",
+                "-c",
+                "features.apps=false",
+                "--sandbox",
+                "workspace-write",
+            ]
+        );
+        for profile in [PermissionProfile::Restricted, PermissionProfile::Networked] {
+            let arguments = codex_permission_arguments(profile);
+            assert!(!arguments.contains(&"danger-full-access"));
+            assert!(!arguments
+                .iter()
+                .any(|value| value.contains("approval_policy=\"on")));
+            assert!(!arguments
+                .iter()
+                .any(|value| value.contains("features.apps=true")));
+        }
     }
 
     #[test]
@@ -685,10 +837,14 @@ mod tests {
             position: 0,
             depends_on_task_id: None,
             dependency_type: "success".into(),
+            source_task_id: None,
+            attempt_kind: None,
+            attempt_number: 1,
             timezone: "UTC".into(),
             difficulty: "simple".into(),
             model: "gpt-5.6-luna".into(),
             effort: "low".into(),
+            permission_profile: PermissionProfile::Restricted,
             status: "scheduled".into(),
             created_at: 0,
             updated_at: 0,
@@ -721,10 +877,14 @@ mod tests {
             position: 0,
             depends_on_task_id: Some("task-1".into()),
             dependency_type: "quota_reset".into(),
+            source_task_id: Some("task-1".into()),
+            attempt_kind: Some("quota_resume".into()),
+            attempt_number: 2,
             timezone: "UTC".into(),
             difficulty: "simple".into(),
             model: "gpt-5.6-luna".into(),
             effort: "low".into(),
+            permission_profile: PermissionProfile::Restricted,
             status: "running".into(),
             created_at: 0,
             updated_at: 0,
@@ -733,18 +893,19 @@ mod tests {
         let snapshot = UsageSnapshot {
             adapter: "test".into(),
             captured_at: 1,
-            five_hour: RateWindow {
+            five_hour: Some(RateWindow {
                 used_percent: 90.0,
                 remaining_percent: 10.0,
                 duration_minutes: 300,
                 resets_at: 100,
-            },
+            }),
             weekly: RateWindow {
                 used_percent: 20.0,
                 remaining_percent: 80.0,
                 duration_minutes: 10_080,
                 resets_at: 200,
             },
+            warnings: Vec::new(),
         };
         assert!(should_defer_continuation(&task, &snapshot));
 
@@ -787,10 +948,14 @@ mod tests {
             position: 0,
             depends_on_task_id: Some("task-1".into()),
             dependency_type: "quota_reset".into(),
+            source_task_id: Some("task-1".into()),
+            attempt_kind: Some("quota_resume".into()),
+            attempt_number: 2,
             timezone: "UTC".into(),
             difficulty: "simple".into(),
             model: "gpt-5.6-luna".into(),
             effort: "low".into(),
+            permission_profile: PermissionProfile::Restricted,
             status: "scheduled".into(),
             created_at: 0,
             updated_at: 0,
