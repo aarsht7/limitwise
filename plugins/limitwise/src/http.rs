@@ -1286,7 +1286,14 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(rejected.code, "confirmation_required");
-        assert_eq!(canonical_directory(Path::new("/tmp")).unwrap(), "/tmp");
+        let canonical_tmp = std::fs::canonicalize("/tmp")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            canonical_directory(Path::new("/tmp")).unwrap(),
+            canonical_tmp
+        );
     }
 
     #[test]
@@ -1514,7 +1521,11 @@ mod tests {
         assert_eq!(planned.get("planner_model"), Some(&json!("gpt-5.6-sol")));
         assert_eq!(planned.get("planner_effort"), Some(&json!("high")));
         assert_eq!(planned.get("weekly_cap_percent"), Some(&json!(3.0)));
-        assert_eq!(planned.get("cwd"), Some(&json!("/tmp")));
+        let canonical_tmp = std::fs::canonicalize("/tmp")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(planned.get("cwd"), Some(&json!(canonical_tmp)));
         assert_eq!(planned.pointer("/tasks/0/model"), Some(&json!("gpt-6-sol")));
         assert_eq!(planned.pointer("/tasks/0/effort"), Some(&json!("medium")));
         assert_eq!(
