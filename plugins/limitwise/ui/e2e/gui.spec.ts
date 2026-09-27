@@ -215,7 +215,8 @@ test("networked composer requires distinct acknowledgement and cancelled warning
   await page.getByLabel("Run at time (24-hour)").fill("10:00");
   await page.getByLabel("Permission profile").selectOption("networked");
   await page.getByRole("button", { name: "Review exact payload" }).click();
-  await expect(page.getByText(/Network and web search are enabled/)).toBeVisible();
+  const confirmation = page.getByRole("heading", { name: "Review before scheduling" }).locator("..");
+  await expect(confirmation.getByText(/Network and web search are enabled/)).toBeVisible();
   const confirm = page.getByRole("button", { name: "Confirm and schedule once" });
   await expect(confirm).toBeDisabled();
   await page.getByRole("button", { name: "Back to edit" }).click();
