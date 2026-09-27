@@ -74,6 +74,48 @@ limitwise setup
 
 This creates a systemd user service on Linux or a LaunchAgent on macOS. The macOS LaunchAgent path is untested, including on Apple Silicon. Open a new Codex conversation after installation.
 
+#### Make the `limitwise` command available
+
+The installer stores the binary in LimitWise's user data directory. That directory is not normally on your shell's `PATH`, so the plugin can be installed successfully while `limitwise setup` still reports `command not found`.
+
+On Linux, make the command available through the commonly configured `~/.local/bin` directory:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+ln -s "${XDG_DATA_HOME:-$HOME/.local/share}/limitwise/bin/limitwise" "$HOME/.local/bin/limitwise"
+```
+
+On macOS, use the same command directory but link to the macOS application-support path:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+ln -s "$HOME/Library/Application Support/LimitWise/bin/limitwise" "$HOME/.local/bin/limitwise"
+```
+
+If the destination already exists, do not create a second link; verify the existing command with `ls -l "$HOME/.local/bin/limitwise"`. Ensure this line is present in your shell startup file (`~/.bashrc` for Bash or `~/.zshrc` for Zsh), then open a new terminal:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Verify the command before setting up the optional service:
+
+```sh
+command -v limitwise
+limitwise --version
+limitwise setup
+```
+
+You can also run setup immediately without changing `PATH`:
+
+```sh
+# Linux
+"${XDG_DATA_HOME:-$HOME/.local/share}/limitwise/bin/limitwise" setup
+
+# macOS
+"$HOME/Library/Application Support/LimitWise/bin/limitwise" setup
+```
+
 ### Method 2: Direct marketplace install (no prebuilt binary)
 
 Use this if you only want the plugin registration and will handle the binary yourself:
@@ -95,6 +137,17 @@ cargo build --release
 ```
 
 This builds a local binary using your machine toolchain, which can help when prebuilt binaries do not match your system runtime.
+
+For another Linux or Unix-like platform, copy the locally built executable into the same user command directory and ensure that directory is on `PATH`:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 700 target/release/limitwise "$HOME/.local/bin/limitwise"
+export PATH="$HOME/.local/bin:$PATH"
+limitwise --version
+```
+
+On Windows or any operating system other than Linux and macOS, no prebuilt installer or native LimitWise background-service setup is currently supported. A successful local build can be run directly—for example, `./target/release/limitwise` on Unix or `.\\target\\release\\limitwise.exe` in PowerShell—and its directory can be added to the user's `PATH`. The `limitwise setup` command itself supports only Linux and macOS.
 
 ## Update LimitWise
 
@@ -120,6 +173,8 @@ Open a new Codex conversation after either update method. Existing conversations
 Run these checks after any install method:
 
 ```sh
+command -v limitwise
+limitwise --version
 codex plugin list
 codex plugin marketplace list
 ```

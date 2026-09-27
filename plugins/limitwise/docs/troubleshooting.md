@@ -7,6 +7,34 @@ title: Troubleshooting
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
+## `limitwise: command not found` after installation
+
+The one-line installer can complete successfully while the binary's user data directory remains outside your shell's `PATH`. This does not mean the Codex plugin installation failed.
+
+Create a command link on Linux:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+ln -s "${XDG_DATA_HOME:-$HOME/.local/share}/limitwise/bin/limitwise" "$HOME/.local/bin/limitwise"
+```
+
+Create a command link on macOS:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+ln -s "$HOME/Library/Application Support/LimitWise/bin/limitwise" "$HOME/.local/bin/limitwise"
+```
+
+Ensure `export PATH="$HOME/.local/bin:$PATH"` is in `~/.bashrc` or `~/.zshrc`, open a new terminal, then verify and run setup:
+
+```sh
+command -v limitwise
+limitwise --version
+limitwise setup
+```
+
+If the link already exists, inspect it with `ls -l "$HOME/.local/bin/limitwise"` instead of replacing it blindly. On another operating system, build from source and add the resulting executable's directory to the user `PATH`; native `limitwise setup` currently supports only Linux and macOS. See [Make the `limitwise` command available](getting-started.md#make-the-limitwise-command-available) for direct-path commands and platform details.
+
 ## The local browser UI does not open
 
 Run it without the browser opener and copy the printed launch URL into a browser on the same machine:

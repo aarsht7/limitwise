@@ -36,6 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/aarsht7/limitwise/main/install.sh |
 
 The installer checks Codex sign-in, downloads a prebuilt release, verifies its SHA-256 checksum, installs the GitHub marketplace, and installs `limitwise@limitwise`. It asks separately before installing the background service. Open a new Codex conversation afterward.
 
+If installation succeeds but `limitwise setup` reports `command not found`, expose the installed binary through your shell `PATH` using the [Linux, macOS, or other-platform instructions](docs/getting-started.md#make-the-limitwise-command-available).
+
 What this method installs:
 
 - plugin: `limitwise@limitwise`
