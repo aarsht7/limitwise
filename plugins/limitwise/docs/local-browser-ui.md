@@ -7,10 +7,6 @@ title: Local browser UI
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
-## Docs menu
-
-[Home](index.md) | [Demos](demos.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Local browser UI](local-browser-ui.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
-
 The local UI exposes the existing scheduler, diagnostics, quota, statistics, task-management, and service-setup operations without reading SQLite in browser code.
 
 ## Launch

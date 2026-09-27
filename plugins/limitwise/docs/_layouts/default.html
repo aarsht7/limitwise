@@ -26,27 +26,67 @@
     <header class="site-header">
       <div class="site-header-inner">
         <a class="brand-lockup" href="{{ '/' | relative_url }}" aria-label="LimitWise documentation home">
-          <span class="brand-mark" aria-hidden="true">LW</span>
+          <span class="brand-mark" aria-hidden="true"><span>LW</span></span>
           <span class="brand-copy">
             <strong>LimitWise</strong>
-            <small>Quota-aware Codex scheduling</small>
+            <small>Documentation</small>
           </span>
         </a>
 
-        <div class="theme-switch" role="group" aria-label="Color theme">
-          <button type="button" data-theme-choice="dark" aria-pressed="true">Dark</button>
-          <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+        <div class="header-actions">
+          <a class="source-link" href="https://github.com/aarsht7/limitwise">Source <span aria-hidden="true">↗</span></a>
+          <div class="theme-switch" role="group" aria-label="Color theme">
+            <button type="button" data-theme-choice="dark" aria-pressed="true">Dark</button>
+            <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+          </div>
         </div>
       </div>
     </header>
 
-    <main id="main-content" class="main-content" role="main">
-      {{ content }}
-    </main>
+    <div class="docs-shell">
+      <aside class="docs-sidebar" aria-label="Documentation navigation">
+        <nav class="docs-nav">
+          <section class="nav-group" aria-labelledby="nav-overview">
+            <h2 id="nav-overview">Overview</h2>
+            <a href="{{ '/' | relative_url }}"{% if page.url == '/' or page.url == '/index.html' %} class="active" aria-current="page"{% endif %}>Home</a>
+            <a href="{{ '/demos.html' | relative_url }}"{% if page.url == '/demos.html' %} class="active" aria-current="page"{% endif %}>Demo videos</a>
+          </section>
+
+          <section class="nav-group" aria-labelledby="nav-guides">
+            <h2 id="nav-guides">Guides</h2>
+            <a href="{{ '/getting-started.html' | relative_url }}"{% if page.url == '/getting-started.html' %} class="active" aria-current="page"{% endif %}>Getting started</a>
+            <a href="{{ '/using-limitwise.html' | relative_url }}"{% if page.url == '/using-limitwise.html' %} class="active" aria-current="page"{% endif %}>Using LimitWise</a>
+            <a href="{{ '/local-browser-ui.html' | relative_url }}"{% if page.url == '/local-browser-ui.html' %} class="active" aria-current="page"{% endif %}>Local browser UI</a>
+          </section>
+
+          <section class="nav-group" aria-labelledby="nav-reference">
+            <h2 id="nav-reference">Reference</h2>
+            <a href="{{ '/troubleshooting.html' | relative_url }}"{% if page.url == '/troubleshooting.html' %} class="active" aria-current="page"{% endif %}>Troubleshooting</a>
+            <a href="{{ '/ARCHITECTURE.html' | relative_url }}"{% if page.url == '/ARCHITECTURE.html' %} class="active" aria-current="page"{% endif %}>Architecture</a>
+          </section>
+        </nav>
+
+        <div class="sidebar-note">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Local-first scheduling</span>
+        </div>
+      </aside>
+
+      <main id="main-content" class="main-content" role="main">
+        <div class="page-context" aria-hidden="true">
+          <span>Docs</span>
+          <span>/</span>
+          <span>{{ page.title }}</span>
+        </div>
+        <article class="doc-content">
+          {{ content }}
+        </article>
+      </main>
+    </div>
 
     <footer class="site-footer">
-      <span>LimitWise documentation</span>
-      <a href="{{ '/ARCHITECTURE.html' | relative_url }}">Architecture</a>
+      <span>LimitWise · quota-aware Codex scheduling</span>
+      <span>Local by design</span>
     </footer>
 
     <script src="{{ '/assets/js/theme.js' | relative_url }}" defer></script>

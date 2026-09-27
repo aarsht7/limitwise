@@ -7,10 +7,6 @@ title: Troubleshooting
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
-## Docs menu
-
-[Home](index.md) | [Demos](demos.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Local browser UI](local-browser-ui.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
-
 ## The local browser UI does not open
 
 Run it without the browser opener and copy the printed launch URL into a browser on the same machine:

@@ -5,10 +5,6 @@ title: Demo videos
 
 # Demo videos
 
-## Docs menu
-
-[Home](index.md) | [Demos](demos.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Local browser UI](local-browser-ui.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
-
 These recordings demonstrate the two main LimitWise workflows. Both players use standard H.264 MP4 files and include direct-download fallbacks.
 
 ## Local browser UI workflow

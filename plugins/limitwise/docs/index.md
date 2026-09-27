@@ -9,27 +9,26 @@ Schedule Codex work for a specific time while protecting your five-hour and week
 
 > **Compatibility warning:** LimitWise has only been tested on Linux x86-64. macOS, including Apple Silicon, and other architectures are currently untested.
 
-## Docs menu
-
-[Home](index.md) | [Demos](demos.md) | [Getting started](getting-started.md) | [Using LimitWise](using-limitwise.md) | [Local browser UI](local-browser-ui.md) | [Troubleshooting](troubleshooting.md) | [Architecture](ARCHITECTURE.md)
-
 LimitWise is designed for people who want to prepare work now and let Codex run it later. You describe the work in Plan mode, review the proposed model, effort, time, and budget, then confirm the schedule.
 
 ## Watch LimitWise
 
-### Local browser UI
-
-<video controls playsinline preload="metadata" style="display: block; width: 100%; height: auto;" aria-label="LimitWise local browser UI workflow demonstration">
-  <source src="assets/videos/limitwise-gui.mp4" type="video/mp4">
-  Your browser cannot play this video. <a href="assets/videos/limitwise-gui.mp4">Download the GUI demo MP4</a>.
-</video>
-
-### Codex CLI
-
-<video controls playsinline preload="metadata" style="display: block; width: 100%; height: auto;" aria-label="LimitWise Codex CLI workflow demonstration">
-  <source src="assets/videos/limitwise-cli.mp4" type="video/mp4">
-  Your browser cannot play this video. <a href="assets/videos/limitwise-cli.mp4">Download the CLI demo MP4</a>.
-</video>
+<div class="media-grid">
+  <section class="media-card">
+    <h3>Local browser UI</h3>
+    <video controls playsinline preload="metadata" aria-label="LimitWise local browser UI workflow demonstration">
+      <source src="assets/videos/limitwise-gui.mp4" type="video/mp4">
+      Your browser cannot play this video. <a href="assets/videos/limitwise-gui.mp4">Download the GUI demo MP4</a>.
+    </video>
+  </section>
+  <section class="media-card">
+    <h3>Codex CLI</h3>
+    <video controls playsinline preload="metadata" aria-label="LimitWise Codex CLI workflow demonstration">
+      <source src="assets/videos/limitwise-cli.mp4" type="video/mp4">
+      Your browser cannot play this video. <a href="assets/videos/limitwise-cli.mp4">Download the CLI demo MP4</a>.
+    </video>
+  </section>
+</div>
 
 [Open the dedicated demos page](demos.md) for descriptions and direct downloads.
 
