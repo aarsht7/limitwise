@@ -149,35 +149,37 @@ button {
 }
 
 .brand-mark {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 2rem;
-  height: 2rem;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--border));
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
-  color: var(--accent);
-  font-size: .7rem;
-  font-weight: 850;
-  letter-spacing: -.04em;
+  display: block;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: 0 0 auto;
 }
 
-.brand-mark::after {
-  position: absolute;
-  right: -.35rem;
-  bottom: -.35rem;
-  width: .85rem;
-  height: .85rem;
-  border: 1px solid var(--violet);
-  border-radius: 50%;
-  content: "";
+.brand-mark-surface {
+  fill: var(--surface);
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
 }
 
-.brand-mark span {
-  position: relative;
-  z-index: 1;
+.brand-mark-axis,
+.brand-mark-signal {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.brand-mark-axis {
+  stroke: var(--accent);
+  stroke-width: 4;
+}
+
+.brand-mark-signal {
+  stroke: var(--violet);
+  stroke-width: 3.5;
+}
+
+.brand-mark-point {
+  fill: var(--accent);
 }
 
 .brand-copy {

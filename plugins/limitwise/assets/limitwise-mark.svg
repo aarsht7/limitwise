@@ -1,6 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="LimitWise">
-  <rect width="128" height="128" rx="28" fill="#2E7D6E"/>
-  <path d="M31 30v68h43" fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M52 78l15-17 12 10 20-27" fill="none" stroke="#C9F5E8" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="99" cy="44" r="7" fill="#fff"/>
+  <style>
+    .surface { fill: #10151f; stroke: #3a4961; }
+    .axis, .point { stroke: #4da3ff; }
+    .signal { stroke: #9b7cff; }
+    .point { fill: #4da3ff; }
+    @media (prefers-color-scheme: light) {
+      .surface { fill: #f4efe6; stroke: #968a78; }
+      .axis, .point { stroke: #005fc7; }
+      .signal { stroke: #6338b9; }
+      .point { fill: #005fc7; }
+    }
+  </style>
+  <rect class="surface" x="4" y="4" width="120" height="120" rx="30" stroke-width="4"/>
+  <path class="axis" d="M35 32v64h37" fill="none" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="signal" d="m53 77 16-19 13 11 19-27" fill="none" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="point" cx="101" cy="42" r="7"/>
 </svg>
